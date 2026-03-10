@@ -520,35 +520,42 @@ def clean_old_requests(d):
 
 # ==================== الخريطة ====================
 def generate_map(players, d):
+    import base64
     img     = Image.open(MAP_FILE).convert("RGBA")
     draw    = ImageDraw.Draw(img)
     straits = get_strait_status(d)
 
     for uid, p in players.items():
-        region    = p.get("region")
+        region = p.get("region")
         if region not in REGION_COORDS: continue
-        flag_path = os.path.join(FLAGS_DIR, f"{region}.png")
         lvl   = get_level(p.get("xp", 0))
         tag   = " 🗡️" if p.get("traitor") else ""
         label = f"{lvl['emoji']}{p.get('country_name','')}{tag}"
 
+        # تحميل العلم من البيانات المحفوظة
+        flag_img = None
+        flag_b64 = p.get("flag_b64")
+        if flag_b64:
+            try:
+                flag_img = Image.open(io.BytesIO(base64.b64decode(flag_b64))).convert("RGBA")
+            except:
+                flag_img = None
+
         for i, (cx, cy) in enumerate(REGION_COORDS[region]):
             size = FLAG_SIZE_MAIN if i == 0 else FLAG_SIZE_SMALL
-            if os.path.exists(flag_path):
-                flag = Image.open(flag_path).convert("RGBA")
-                f2   = flag.resize((size, int(size*0.6)), Image.LANCZOS)
+            if flag_img:
+                f2 = flag_img.resize((size, int(size*0.6)), Image.LANCZOS)
                 fw, fh = f2.size
                 img.paste(f2, (cx-fw//2, cy-fh//2), f2)
                 draw.rectangle([cx-fw//2-2, cy-fh//2-2, cx+fw//2+2, cy+fh//2+2],
                                outline="white", width=3)
             else:
-                # بدون علم — دائرة ملوّنة
                 draw.ellipse([cx-30, cy-20, cx+30, cy+20], fill="royalblue", outline="white", width=2)
             if i == 0:
-                # ظل أسود ثم نص أبيض
                 for ox, oy in [(-1,1),(1,1),(-1,-1),(1,-1)]:
                     draw.text((cx+ox, cy+int(size*0.6)//2+8+oy), label, fill="black", anchor="mt")
                 draw.text((cx, cy+int(size*0.6)//2+8), label, fill="white", anchor="mt")
+
 
     # ===== المضائق =====
     strait_pos = {"هرمز":(1400,1050),"باب المندب":(1100,1550),"السويس":(500,950)}
@@ -1109,39 +1116,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_old_requests(data)
     ntext = norm(text)  # نسخة منقحة للمقارنة
 
-    # ======= أدمن: انشاء دولة بعلم =======
-    if is_admin(uid) and update.message.photo and text.startswith("دولة "):
-        parts = text.split()
-        if len(parts) < 4:
-            await update.message.reply_text("الصيغة:\n`دولة [المنطقة] [اسم] [الكود]`", parse_mode="Markdown"); return
-        code   = parts[-1].upper()
-        region = parts[1]
-        cname  = " ".join(parts[2:-1])
-        if code not in data["pending_codes"]:
-            await update.message.reply_text(f"الكود `{code}` مش موجود.", parse_mode="Markdown"); return
-        if region not in AVAILABLE_REGIONS:
-            await update.message.reply_text(f"'{region}' مش في القائمة."); return
-        for _, p in data["players"].items():
-            if p["region"] == region:
-                await update.message.reply_text(f"'{region}' محجوزة."); return
-        photo  = update.message.photo[-1]
-        ff     = await context.bot.get_file(photo.file_id)
-        await ff.download_to_drive(os.path.join(FLAGS_DIR, f"{region}.png"))
-        pid    = data["pending_codes"].pop(code)
-        pl     = new_player(region, cname, pid)
-        res    = REGION_RESOURCES.get(region, [])
-        data["players"][str(pid)] = pl
-        save_data(data)
-        await update.message.reply_text(
-            f"✅ تم!\n🏳️ *{cname}* ← {region}\n🔑 `{pl['player_code']}`", parse_mode="Markdown")
-        try:
-            await context.bot.send_message(chat_id=pid,
-                text=f"🎊 *تم تفعيل دولتك!*\n{sep('═')}\n"
-                     f"🏳️ *{cname}* | 🗺️ {region}\n"
-                     f"🌍 الموارد: {', '.join(res) if res else 'لا يوجد'}\n{sep()}\n"
-                     f"💰 مثاقيل: 1,000 | ⚔️ جيش: 100\n📖 اكتب *مساعدة*", parse_mode="Markdown")
-        except: pass
-        return
 
     # ======= انشاء دولة =======
     if ntext == "انشاء دوله":
@@ -1166,7 +1140,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔑 كودك:\n```\n{p['player_code']}```", parse_mode="Markdown")
         return
 
-    # ======= كوده — رداً على رسالة شخص =======
+     # ======= أدمن: انشاء دولة بعلم =======
+    if is_admin(uid) and update.message.photo and text.startswith("دولة "):
+        parts = text.split()
+        if len(parts) < 4:
+            await update.message.reply_text("الصيغة:\n`دولة [المنطقة] [اسم] [الكود]`", parse_mode="Markdown"); return
+        code   = parts[-1].upper()
+        region = parts[1]
+        cname  = " ".join(parts[2:-1])
+        if code not in data["pending_codes"]:
+            await update.message.reply_text(f"الكود `{code}` مش موجود.", parse_mode="Markdown"); return
+        if region not in AVAILABLE_REGIONS:
+            await update.message.reply_text(f"'{region}' مش في القائمة."); return
+        for _, p in data["players"].items():
+            if p["region"] == region:
+                await update.message.reply_text(f"'{region}' محجوزة."); return
+        photo  = update.message.photo[-1]
+        pid    = data["pending_codes"].pop(code)
+        pl     = new_player(region, cname, pid)
+        ff = await context.bot.get_file(photo.file_id)
+        buf_flag = io.BytesIO()
+        await ff.download_to_memory(buf_flag)
+        pl["flag_b64"] = base64.b64encode(buf_flag.getvalue()).decode()
+        res    = REGION_RESOURCES.get(region, [])
+        data["players"][str(pid)] = pl
+        save_data(data)
+        await update.message.reply_text(
+            f"✅ تم!\n🏳️ *{cname}* ← {region}\n🔑 `{pl['player_code']}`", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=pid,
+                text=f"🎊 *تم تفعيل دولتك!*\n{sep('═')}\n"
+                     f"🏳️ *{cname}* | 🗺️ {region}\n"
+                     f"🌍 الموارد: {', '.join(res) if res else 'لا يوجد'}\n{sep()}\n"
+                     f"💰 مثاقيل: 1,000 | ⚔️ جيش: 100\n📖 اكتب *مساعدة*", parse_mode="Markdown")
+        except: pass
+        return
+        
+        #— رداً على رسالة شخص =======
     if ntext in ["كوده","كودها","كودهم"]:
         replied = update.message.reply_to_message
         if not replied:

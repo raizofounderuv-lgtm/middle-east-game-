@@ -2,7 +2,7 @@
 🗺️ لعبة الشرق الأوسط الجيوسياسية - النسخة 3.0
 """
 import logging, random, string, json, os, io, time, asyncio
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
@@ -74,22 +74,25 @@ STRAITS = {
 
 # ==================== الموارد ====================
 REGION_RESOURCES = {
-    "السعودية":["نفط","غاز"], "الكويت":["نفط","غاز"], "العراق":["نفط","غاز"],
-    "قطر":["غاز","نفط"],      "ليبيا":["نفط"],          "ايران":["نفط","غاز","صلب"],
-    "الامارات":["ذهب","غاز"], "البحرين":["ذهب"],         "السودان":["قمح","ذهب"],
-    "اسرائيل":["صلب","قمح"],  "عمان":["نفط","غاز"],
-    "مصر":["قمح","ارز","فول"],
-    "سوريا":["قمح","زيتون"],   "اليمن":["بن","فول"],
-    "تركيا":["قمح","بطاطس","صلب"], "الاردن":["بطاطس","زيتون"],
-    "فلسطين":["زيتون","فول"],  "لبنان":["زيتون","ذهب"],
-    "قبرص":["زيتون","ذهب"],
-    # محطات التحلية متاحة للمناطق الجافة
     "السعودية":["نفط","غاز","محطة_تحليه"],
+    "الكويت": ["نفط","غاز","محطة_تحليه"],
+    "العراق": ["نفط","غاز"],
+    "قطر":    ["غاز","نفط","محطة_تحليه"],
+    "ليبيا":  ["نفط"],
+    "ايران":  ["نفط","غاز","صلب"],
     "الامارات":["ذهب","غاز","محطة_تحليه"],
-    "قطر":["غاز","نفط","محطة_تحليه"],
-    "الكويت":["نفط","غاز","محطة_تحليه"],
-    "البحرين":["ذهب","محطة_تحليه"],
-    "عمان":["نفط","غاز","محطة_تحليه"],
+    "البحرين": ["ذهب","محطة_تحليه"],
+    "السودان": ["قمح","ذهب"],
+    "اسرائيل": ["صلب","قمح"],
+    "عمان":   ["نفط","غاز","محطة_تحليه"],
+    "مصر":    ["قمح","ارز","فول"],
+    "سوريا":  ["قمح","زيتون"],
+    "اليمن":  ["بن","فول"],
+    "تركيا":  ["قمح","بطاطس","صلب"],
+    "الاردن": ["بطاطس","زيتون"],
+    "فلسطين": ["زيتون","فول"],
+    "لبنان":  ["زيتون","ذهب"],
+    "قبرص":   ["زيتون","ذهب"],
 }
 
 RESOURCE_FACILITIES = {
@@ -377,6 +380,14 @@ def get_facility_infra_req(fac_id, region):
     else:
         return req.get("infra_other", 5)
 
+
+    """تطبيع النص — ة↔ه، همزات، ألف مقصورة"""
+    t = t.strip()
+    t = t.replace("أ","ا").replace("إ","ا").replace("آ","ا")
+    t = t.replace("ة","ه")
+    t = t.replace("ى","ي")
+    return t
+
 def norm(t):
     """تطبيع النص — ة↔ه، همزات، ألف مقصورة"""
     t = t.strip()
@@ -479,14 +490,31 @@ def calc_colony_harvest(col_p):
 
 def new_player(region, country_name, player_id):
     return {
-        "country_name":country_name, "region":region,
-        "gold":5000, "army":100, "territories":1,
-        "allies":[], "at_war":[], "last_tax":0,
-        "player_code":generate_code(), "xp":0,
-        "facilities":{}, "crops":{}, "crops_amount":{},
-        "infrastructure":0, "capital":"",
-        "traitor":False, "wars_lost":0, "disasters_hit":0,
-        "last_attack":0, "loans":[],
+        "country_name":    country_name,
+        "region":          region,
+        "gold":            5000,
+        "army":            100,
+        "territories":     1,
+        "allies":          [],
+        "at_war":          [],
+        "last_tax":        0,
+        "player_code":     generate_code(),
+        "xp":              0,
+        "facilities":      {},
+        "crops":           {},
+        "crops_amount":    {},
+        "infrastructure":  0,
+        "capital":         "",
+        "traitor":         False,
+        "wars_lost":       0,
+        "disasters_hit":   0,
+        "last_attack":     0,
+        "loans":           [],
+        "weapons":         {},
+        "occupied_by":     None,
+        "colony_of":       None,
+        "nuke_banned":     0,
+        "colony_last_harvest": 0,
     }
 
 def get_farm_cost(d, crop):
@@ -520,42 +548,56 @@ def clean_old_requests(d):
 
 # ==================== الخريطة ====================
 def generate_map(players, d):
-    import base64
+    if not os.path.exists(MAP_FILE):
+        # ارجع صورة فارغة لو الخريطة مش موجودة
+        img = Image.new("RGBA", (800, 600), (240, 240, 240, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG"); buf.seek(0)
+        return buf
+
     img     = Image.open(MAP_FILE).convert("RGBA")
     draw    = ImageDraw.Draw(img)
     straits = get_strait_status(d)
 
+    # حمّل خط — fallback للخط الافتراضي لو مش موجود
+    try:
+        font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    except:
+        font_label = ImageFont.load_default()
+        font_small = font_label
+
     for uid, p in players.items():
-        region = p.get("region")
+        region    = p.get("region")
         if region not in REGION_COORDS: continue
+        flag_path = os.path.join(FLAGS_DIR, f"{region}.png")
         lvl   = get_level(p.get("xp", 0))
         tag   = " 🗡️" if p.get("traitor") else ""
         label = f"{lvl['emoji']}{p.get('country_name','')}{tag}"
 
-        # تحميل العلم من البيانات المحفوظة
-        flag_img = None
-        flag_b64 = p.get("flag_b64")
-        if flag_b64:
-            try:
-                flag_img = Image.open(io.BytesIO(base64.b64decode(flag_b64))).convert("RGBA")
-            except:
-                flag_img = None
-
         for i, (cx, cy) in enumerate(REGION_COORDS[region]):
             size = FLAG_SIZE_MAIN if i == 0 else FLAG_SIZE_SMALL
-            if flag_img:
-                f2 = flag_img.resize((size, int(size*0.6)), Image.LANCZOS)
-                fw, fh = f2.size
-                img.paste(f2, (cx-fw//2, cy-fh//2), f2)
-                draw.rectangle([cx-fw//2-2, cy-fh//2-2, cx+fw//2+2, cy+fh//2+2],
-                               outline="white", width=3)
+            if os.path.exists(flag_path):
+                try:
+                    flag = Image.open(flag_path).convert("RGBA")
+                    f2   = flag.resize((size, int(size*0.6)), Image.LANCZOS)
+                    fw, fh = f2.size
+                    img.paste(f2, (cx-fw//2, cy-fh//2), f2)
+                    draw.rectangle([cx-fw//2-2, cy-fh//2-2, cx+fw//2+2, cy+fh//2+2],
+                                   outline="white", width=3)
+                    flag.close(); f2.close()
+                except Exception as e:
+                    logging.warning(f"Flag error {region}: {e}")
+                    draw.ellipse([cx-30, cy-20, cx+30, cy+20], fill="royalblue", outline="white", width=2)
             else:
+                # بدون علم — دائرة ملوّنة
                 draw.ellipse([cx-30, cy-20, cx+30, cy+20], fill="royalblue", outline="white", width=2)
             if i == 0:
+                # ظل أسود ثم نص أبيض
+                ty = cy + int(size*0.6)//2 + 8
                 for ox, oy in [(-1,1),(1,1),(-1,-1),(1,-1)]:
-                    draw.text((cx+ox, cy+int(size*0.6)//2+8+oy), label, fill="black", anchor="mt")
-                draw.text((cx, cy+int(size*0.6)//2+8), label, fill="white", anchor="mt")
-
+                    draw.text((cx+ox, ty+oy), label, fill="black", anchor="mt", font=font_label)
+                draw.text((cx, ty), label, fill="white", anchor="mt", font=font_label)
 
     # ===== المضائق =====
     strait_pos = {"هرمز":(1400,1050),"باب المندب":(1100,1550),"السويس":(500,950)}
@@ -564,11 +606,10 @@ def generate_map(players, d):
         col = "red" if s.get("blocked") else "cyan"
         cx, cy = pos
         draw.ellipse([cx-20,cy-20,cx+20,cy+20], fill=col, outline="black", width=2)
+        sname = f"{'🔴' if s.get('blocked') else '🟢'}{name}"
         for ox, oy in [(-1,1),(1,1)]:
-            draw.text((cx+ox, cy+26+oy), f"{'🔴' if s.get('blocked') else '🟢'}{name}",
-                      fill="black", anchor="mt")
-        draw.text((cx, cy+26), f"{'🔴' if s.get('blocked') else '🟢'}{name}",
-                  fill="white", anchor="mt")
+            draw.text((cx+ox, cy+26+oy), sname, fill="black", anchor="mt", font=font_small)
+        draw.text((cx, cy+26), sname, fill="white", anchor="mt", font=font_small)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG"); buf.seek(0)
@@ -1116,6 +1157,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_old_requests(data)
     ntext = norm(text)  # نسخة منقحة للمقارنة
 
+    # ======= أدمن: انشاء دولة بعلم =======
+    if is_admin(uid) and update.message.photo and ntext.startswith("دوله "):
+        parts = text.split()
+        if len(parts) < 4:
+            await update.message.reply_text("الصيغة:\n`دولة [المنطقة] [اسم] [الكود]`", parse_mode="Markdown"); return
+        code   = parts[-1].upper()
+        region = parts[1]
+        cname  = " ".join(parts[2:-1])
+        if code not in data["pending_codes"]:
+            await update.message.reply_text(f"الكود `{code}` مش موجود.", parse_mode="Markdown"); return
+        if region not in AVAILABLE_REGIONS:
+            await update.message.reply_text(f"'{region}' مش في القائمة."); return
+        for _, p in data["players"].items():
+            if p["region"] == region:
+                await update.message.reply_text(f"'{region}' محجوزة."); return
+        photo  = update.message.photo[-1]
+        ff     = await context.bot.get_file(photo.file_id)
+        await ff.download_to_drive(os.path.join(FLAGS_DIR, f"{region}.png"))
+        pid    = data["pending_codes"].pop(code)
+        pl     = new_player(region, cname, pid)
+        res    = REGION_RESOURCES.get(region, [])
+        data["players"][str(pid)] = pl
+        save_data(data)
+        await update.message.reply_text(
+            f"✅ تم!\n🏳️ *{cname}* ← {region}\n🔑 `{pl['player_code']}`", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=pid,
+                text=f"🎊 *تم تفعيل دولتك!*\n{sep('═')}\n"
+                     f"🏳️ *{cname}* | 🗺️ {region}\n"
+                     f"🌍 الموارد: {', '.join(res) if res else 'لا يوجد'}\n{sep()}\n"
+                     f"💰 مثاقيل: 1,000 | ⚔️ جيش: 100\n📖 اكتب *مساعدة*", parse_mode="Markdown")
+        except: pass
+        return
 
     # ======= انشاء دولة =======
     if ntext == "انشاء دوله":
@@ -1140,43 +1214,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔑 كودك:\n```\n{p['player_code']}```", parse_mode="Markdown")
         return
 
-     # ======= أدمن: انشاء دولة بعلم =======
-    if is_admin(uid) and update.message.photo and text.startswith("دولة "):
-        parts = text.split()
-        if len(parts) < 4:
-            await update.message.reply_text("الصيغة:\n`دولة [المنطقة] [اسم] [الكود]`", parse_mode="Markdown"); return
-        code   = parts[-1].upper()
-        region = parts[1]
-        cname  = " ".join(parts[2:-1])
-        if code not in data["pending_codes"]:
-            await update.message.reply_text(f"الكود `{code}` مش موجود.", parse_mode="Markdown"); return
-        if region not in AVAILABLE_REGIONS:
-            await update.message.reply_text(f"'{region}' مش في القائمة."); return
-        for _, p in data["players"].items():
-            if p["region"] == region:
-                await update.message.reply_text(f"'{region}' محجوزة."); return
-        photo  = update.message.photo[-1]
-        pid    = data["pending_codes"].pop(code)
-        pl     = new_player(region, cname, pid)
-        ff = await context.bot.get_file(photo.file_id)
-        buf_flag = io.BytesIO()
-        await ff.download_to_memory(buf_flag)
-        pl["flag_b64"] = base64.b64encode(buf_flag.getvalue()).decode()
-        res    = REGION_RESOURCES.get(region, [])
-        data["players"][str(pid)] = pl
-        save_data(data)
-        await update.message.reply_text(
-            f"✅ تم!\n🏳️ *{cname}* ← {region}\n🔑 `{pl['player_code']}`", parse_mode="Markdown")
-        try:
-            await context.bot.send_message(chat_id=pid,
-                text=f"🎊 *تم تفعيل دولتك!*\n{sep('═')}\n"
-                     f"🏳️ *{cname}* | 🗺️ {region}\n"
-                     f"🌍 الموارد: {', '.join(res) if res else 'لا يوجد'}\n{sep()}\n"
-                     f"💰 مثاقيل: 1,000 | ⚔️ جيش: 100\n📖 اكتب *مساعدة*", parse_mode="Markdown")
-        except: pass
-        return
-        
-        #— رداً على رسالة شخص =======
+    # ======= كوده — رداً على رسالة شخص =======
     if ntext in ["كوده","كودها","كودهم"]:
         replied = update.message.reply_to_message
         if not replied:
@@ -1439,10 +1477,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ======= حصاد مستعمرة =======
-    if ntext.startswith("احصد مستعمره ") or text.startswith("حصاد مستعمره "):
+    if ntext.startswith("احصد مستعمره ") or ntext.startswith("حصاد مستعمره "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
-        col_name = text.split("مستعمرة",1)[1].strip()
+        col_name = ntext.split("مستعمره",1)[1].strip()
         col_uid, col_p = None, None
         for tuid, tp in data["players"].items():
             clean = tp.get("country_name","").replace(" (مستعمرة)","").replace(" (محتلة)","")
@@ -1568,17 +1606,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"  🔒 {w['emoji']} {w['name']}\n     _{lock_why.strip()}_\n"
             else:
                 owned_txt = f" ✅(عندك {owned})" if owned else ""
-                cost_fmt = f"{w.get('cost', 0):,}"
+                if w.get("army_scale"):
+                    army = max(1, p.get("army", 1))
+                    cost_est = army * w["cost_per_soldier"]
+                    cost_fmt = f"{w['cost_per_soldier']}¥/جندي ≈ {cost_est:,} لجيشك ({army:,})"
+                    buy_hint = f"`شراء {wid}`"
+                elif w.get("unit"):
+                    cost_fmt = f"{w['cost']:,}¥/وحدة"
+                    buy_hint = f"`شراء {wid} [عدد]`"
+                elif w.get("one_use"):
+                    cost_fmt = f"{w['cost']:,}"
+                    buy_hint = f"`شراء {wid}`"
+                else:
+                    cost_fmt = f"{w['cost']:,}"
+                    buy_hint = f"`شراء {wid}`"
                 msg += f"  {w['emoji']} *{w['name']}*{owned_txt}\n"
                 msg += f"     💰 {CUR}{cost_fmt} | _{w['desc']}_\n"
-                msg += f"     🛒 `شراء {wid}`\n"
-        msg += f"\n{sep()}\n💡 مثال: `شراء دبابات` أو `شراء قنبلة_ذرية`"
+                msg += f"     🛒 {buy_hint}\n"
+        msg += f"\n{sep()}\n💡 مثال: `شراء بندقية_هجوم` | `شراء دبابات 50` | `شراء قنبلة_ذرية`"
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
     # ======= شراء أسلحة =======
     if ntext.startswith("شراء "):
-        if text.strip() == "شراء اسلحة":
+        if ntext == "شراء اسلحه":
             await update.message.reply_text("🏪 اكتب `سوق` لعرض سوق الأسلحة الكامل!", parse_mode="Markdown")
             return
         p = get_player(data, uid)
@@ -1814,7 +1865,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ntext.startswith(f"{action} مضيق "):
             p = get_player(data, uid)
             if not p: await update.message.reply_text("❌ مش مسجل."); return
-            sname = text.replace(f"{action} مضيق","").strip()
+            sname = ntext.replace(f"{action} مضيق","").strip()
             if sname not in STRAITS:
                 await update.message.reply_text(f"❌ المضائق: {', '.join(STRAITS.keys())}"); return
             if p["region"] not in STRAITS[sname]["controller"]:
@@ -2304,7 +2355,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ======= حل الحلف بالتراضي =======
-    if ntext.startswith("حل الحلف مع ") or text.startswith("حل حلف مع "):
+    if ntext.startswith("حل الحلف مع ") or ntext.startswith("حل حلف مع "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
         tname = ntext.replace("حل الحلف مع","").replace("حل حلف مع","").strip()
@@ -2330,7 +2381,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ======= نقض الحلف =======
-    if ntext.startswith("نقض الحلف مع ") or text.startswith("نقض حلف مع "):
+    if ntext.startswith("نقض الحلف مع ") or ntext.startswith("نقض حلف مع "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
         tname = ntext.replace("نقض الحلف مع","").replace("نقض حلف مع","").strip()
@@ -2429,7 +2480,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ======= انشاء حلف/منظمة =======
-    if ntext.startswith("انشاء حلف ") or text.startswith("انشاء حلف "):
+    if ntext.startswith("انشاء حلف ") or ntext.startswith("انشاء حلف "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
         org_name = ntext.replace("انشاء حلف","").replace("إنشاء حلف","").strip()

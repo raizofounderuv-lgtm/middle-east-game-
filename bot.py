@@ -590,6 +590,11 @@ def progress_bar(v, mx, n=10):
     f = int((v/mx)*n) if mx>0 else 0
     return "█"*f + "░"*(n-f)
 
+def pbar(v, n=10):
+    """شريط تقدم من 0-100"""
+    f = int((v/100)*n)
+    return "█"*f + "░"*(n-f)
+
 # ==================== بيانات ====================
 
 _data_lock = asyncio.Lock()
@@ -635,6 +640,7 @@ def load_data():
     d.setdefault("organizations", {})   # {"اسم الحلف": {"founder": "اسم الدولة", "members": [...], "created_at": timestamp}}
     d.setdefault("org_invites", {})      # دعوات الانضمام المعلقة
     d.setdefault("news_channel_id", 0)   # ID القناة/المجموعة للنشرة الإخبارية
+    d.setdefault("news_topic_id", 0)     # ID التوبيك (thread) داخل المجموعة — 0 = بدون توبيك
     return d
 
 
@@ -1290,10 +1296,7 @@ async def disaster_loop(app):
                                 f"🌍 الدول المتضررة ({len(victim_names)}):\n"
                                 f"_{names_txt}_"
                             )
-                            try:
-                                await app.bot.send_message(
-                                    chat_id=channel_id, text=channel_msg, parse_mode="Markdown")
-                            except: pass
+                            await send_to_channel(app.bot, data, channel_msg)
                         await asyncio.sleep(DISASTER_EVERY)
                         continue
 
@@ -1348,10 +1351,7 @@ async def disaster_loop(app):
                         f"{sep()}\n"
                         f"💔 الخسارة: *{loss_desc or '—'}*"
                     )
-                    try:
-                        await app.bot.send_message(
-                            chat_id=channel_id, text=channel_msg, parse_mode="Markdown")
-                    except: pass
+                    await send_to_channel(app.bot, data, channel_msg)
 
         except Exception as e:
             logging.error(f"Disaster loop: {e}")
@@ -1542,6 +1542,21 @@ async def harvest_loop(app):
 
 NEWS_CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))  # ID القناة أو المجموعة
 NEWS_INTERVAL   = 60 * 20   # كل 20 دقيقة
+
+async def send_to_channel(bot, data, text, parse_mode="Markdown"):
+    """إرسال رسالة لقناة/مجموعة النشرة مع دعم التوبيك"""
+    ch       = data.get("news_channel_id", 0)
+    topic_id = data.get("news_topic_id", 0)
+    if not ch:
+        return
+    kwargs = {"chat_id": ch, "text": text, "parse_mode": parse_mode}
+    if topic_id:
+        kwargs["message_thread_id"] = topic_id
+    try:
+        await bot.send_message(**kwargs)
+    except Exception as e:
+        logging.warning(f"send_to_channel error: {e}")
+
 
 # تعليقات ساخرة على الدول الضعيفة
 _WEAK_GOLD_COMMENTS = [
@@ -1995,11 +2010,7 @@ async def news_loop(app):
             if channel_id != 0:
                 text = _build_news(data)
                 if text:
-                    await app.bot.send_message(
-                        chat_id=channel_id,
-                        text=text,
-                        parse_mode="Markdown"
-                    )
+                    await send_to_channel(app.bot, data, text)
         except Exception as e:
             logging.error(f"News loop: {e}")
         await asyncio.sleep(NEWS_INTERVAL)
@@ -5152,15 +5163,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # تفعيل النشرة في هذه القناة/المجموعة
         if ntext in ["تفعيل النشره","فعّل النشره","فعل النشره"]:
-            chat_id = update.effective_chat.id
+            chat_id  = update.effective_chat.id
+            topic_id = data.get("news_topic_id", 0)
             data["news_channel_id"] = chat_id
             save_data(data)
+            topic_txt = f"\n📌 التوبيك: `{topic_id}`" if topic_id else "\n💡 لتحديد توبيك: `توبيك النشرة [id]`"
             await update.message.reply_text(
                 f"📡 *تم تفعيل النشرة الإخبارية!*\n"
-                f"القناة: `{chat_id}`\n"
+                f"القناة: `{chat_id}`"
+                f"{topic_txt}\n"
                 f"ستصلك نشرة كل *20 دقيقة* تلقائياً ✅\n\n"
                 f"لإيقافها: `إيقاف النشرة`",
                 parse_mode="Markdown")
+            return
+
+        # تحديد توبيك النشرة
+        if ntext.startswith("توبيك النشره ") or ntext.startswith("توبيك النشرة "):
+            parts = ntext.split()
+            if len(parts) < 2 or not parts[-1].lstrip("-").isdigit():
+                await update.message.reply_text(
+                    "❌ الصيغة: `توبيك النشرة [id]`\n"
+                    "لإلغاء التوبيك: `توبيك النشرة 0`",
+                    parse_mode="Markdown"); return
+            topic_id = int(parts[-1])
+            data["news_topic_id"] = topic_id
+            save_data(data)
+            if topic_id == 0:
+                await update.message.reply_text("✅ *تم إلغاء التوبيك* — الرسائل ستُرسل بدون توبيك.", parse_mode="Markdown")
+            else:
+                await update.message.reply_text(
+                    f"📌 *تم تحديد التوبيك!*\n"
+                    f"ID: `{topic_id}`\n"
+                    f"كل النشرات والكوارث ستُرسل في هذا التوبيك ✅",
+                    parse_mode="Markdown")
             return
 
         # إيقاف النشرة
@@ -5194,9 +5229,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if ntext == "تاكيد الريست":
             # احفظ الإعدادات المهمة قبل التصفير
-            news_ch  = data.get("news_channel_id", 0)
-            wars_on  = data.get("wars_enabled", True)
-            straits  = data.get("straits", {})
+            news_ch    = data.get("news_channel_id", 0)
+            news_topic = data.get("news_topic_id", 0)
+            wars_on    = data.get("wars_enabled", True)
+            straits    = data.get("straits", {})
 
             # ابنِ تقرير الفائزين قبل التصفير
             players = data.get("players", {})
@@ -5229,6 +5265,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "organizations":   {},
                 "org_invites":     {},
                 "news_channel_id": news_ch,
+                "news_topic_id":   news_topic,
             }
             # احفظ نسخة احتياطية من القديم
             import shutil
@@ -5246,9 +5283,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ابعت تقرير الفائزين للقناة الإخبارية لو موجودة
             if report and news_ch:
-                try:
-                    await context.bot.send_message(chat_id=news_ch, text=report, parse_mode="Markdown")
-                except: pass
+                # استخدم data الجديدة اللي فيها news_topic_id محفوظ
+                tmp = {"news_channel_id": news_ch, "news_topic_id": data.get("news_topic_id", 0)}
+                await send_to_channel(context.bot, tmp, report)
 
             # بلّغ كل اللاعبين السابقين
             for uid_str, p in players.items():
@@ -5291,6 +5328,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• `اعلان [نص]` — إرسال لكل اللاعبين\n"
                 f"• `اقفل الحروب` / `افتح الحروب`\n"
                 f"• `تفعيل النشرة` / `إيقاف النشرة`\n"
+                f"• `توبيك النشرة [id]` — تحديد التوبيك (0 لإلغاء)\n"
                 f"• `نشرة` — اختبار النشرة فوراً\n"
                 f"• `تسريع الكوارث` — تشغيل كارثة فوراً\n"
                 f"• `اعادة اللعبة` — تصفير كامل\n"
@@ -5464,7 +5502,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚔️ الأقوى: *{strongest['country_name']}* ({strongest.get('army',0):,} جندي)\n"
                 f"⭐ الأعلى: *{top_xp['country_name']}* (Lv.{get_level(top_xp.get('xp',0))['level']})\n"
                 f"🛒 عروض السوق: *{market_n}*\n"
-                f"{'⚔️ الحروب مفتوحة' if data.get('wars_enabled',True) else '🕊️ الحروب موقوفة'}",
+                f"{'⚔️ الحروب مفتوحة' if data.get('wars_enabled',True) else '🕊️ الحروب موقوفة'}\n"
+                f"{sep()}\n"
+                f"📡 قناة النشرة: `{data.get('news_channel_id',0) or 'غير محددة'}`\n"
+                f"📌 التوبيك: `{data.get('news_topic_id',0) or 'بدون توبيك'}`",
                 parse_mode="Markdown"); return
 
         # ======= سجل دولة — debug =======
@@ -5526,10 +5567,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sent += 1
                 except: failed += 1
             # أرسله للقناة كمان
-            ch = data.get("news_channel_id", 0)
-            if ch:
-                try: await context.bot.send_message(chat_id=ch, text=msg_out, parse_mode="Markdown")
-                except: pass
+            await send_to_channel(context.bot, data, msg_out)
             await update.message.reply_text(
                 f"✅ الإعلان أُرسل!\n📨 وصل: {sent} | ❌ فشل: {failed}"); return
 
@@ -5571,10 +5609,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             try: await context.bot.send_message(chat_id=int(uid_t), text=dis_msg, parse_mode="Markdown")
             except: pass
-            ch = data.get("news_channel_id", 0)
-            if ch:
-                try: await context.bot.send_message(chat_id=ch, text=dis_msg, parse_mode="Markdown")
-                except: pass
+            await send_to_channel(context.bot, data, dis_msg)
             await update.message.reply_text(
                 f"✅ *كارثة اختبارية!*\n{sep()}\n"
                 f"{dis['emoji']} {dis['name']} ضربت *{pt['country_name']}*\n"

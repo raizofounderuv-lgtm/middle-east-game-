@@ -37,23 +37,23 @@ WAR_EXPIRE     = HOUR_REAL * 48  # حرب تنتهي تلقائياً بعد 48 
 MARKET_TTL     = HOUR_REAL * 72  # عروض السوق تنتهي بعد 72 ساعة لعبة
 MAX_MARKET_PER_PLAYER = 5        # حد أقصى عروض في السوق
 
-FLAG_SIZE_MAIN  = 100
-FLAG_SIZE_SMALL = 50
+FLAG_SIZE_MAIN  = 130
+FLAG_SIZE_SMALL = 65
 
 # دول صغيرة المساحة — علم أصغر عشان ما يغطيش الدولة
 FLAG_SIZE_OVERRIDE = {
-    "قطر":           60,
-    "لبنان":         60,
-    "قبرص":          60,
-    "الكويت":        65,
-    "الاردن":        75,
-    "فلسطين":        60,
-    "جيبوتي":        50,
-    "ارتريا":        60,
-    "ارمينيا":       60,
-    "جورجيا":        65,
-    "اذربيجان":      65,
-    "تونس":          65,
+    "قطر":           78,
+    "لبنان":         78,
+    "قبرص":          78,
+    "الكويت":        85,
+    "الاردن":        98,
+    "فلسطين":        78,
+    "جيبوتي":        65,
+    "ارتريا":        78,
+    "ارمينيا":       78,
+    "جورجيا":        85,
+    "اذربيجان":      85,
+    "تونس":          85,
 }
 
 # ==================== قروض البنك الدولي ====================
@@ -3017,9 +3017,10 @@ async def is_group_member(bot, uid: int, data: dict) -> bool:
     if REQUIRED_GROUP != 0:
         try:
             member = await bot.get_chat_member(chat_id=REQUIRED_GROUP, user_id=uid)
-            return member.status in ("member", "administrator", "creator")
-        except Exception:
-            return False
+            return member.status in ("member", "administrator", "creator", "restricted")
+        except Exception as e:
+            logging.warning(f"is_group_member check failed for uid={uid}: {e}")
+            return True  # fallback عند الشك — نسمح باللعب
     # fallback: فحص أي جروب مفعّل (السلوك القديم)
     allowed = data.get("allowed_groups", {})
     if not allowed:
@@ -3345,11 +3346,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ عندك دولة بالفعل!"); return
         # فحص جروب الصانع — شرط أساسي للتسجيل
         if REQUIRED_GROUP != 0 and not is_admin(uid):
+            in_required = False
             try:
                 member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP, user_id=uid)
-                in_required = member.status in ("member", "administrator", "creator")
-            except Exception:
-                in_required = False
+                in_required = member.status in ("member", "administrator", "creator", "restricted")
+            except Exception as e:
+                # لو الفحص فشل بسبب خطأ تقني — نسمح بالتسجيل ونسجل الخطأ
+                logging.warning(f"REQUIRED_GROUP check failed for uid={uid}: {e}")
+                in_required = True  # fallback: نسمح عند الشك
             if not in_required:
                 await update.message.reply_text(
                     f"🚫 *لازم تكون عضو في الجروب الرسمي عشان تسجل!*\n{sep()}\n"

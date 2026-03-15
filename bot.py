@@ -3011,12 +3011,18 @@ async def send_private_or_queue(bot, data, uid: int, text: str, reply_markup=Non
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # تجاهل الرسائل من الجروبات غير المفعّلة بصمت تام
+    # استثناء: أمر تفعيل البوت يعدي دايماً عشان الأدمن يقدر يفعّل
     chat = update.effective_chat
     if chat and chat.type in ("group", "supergroup"):
-        data_quick = load_data()
-        allowed_quick = data_quick.get("allowed_groups", {})
-        if str(chat.id) not in allowed_quick:
-            return
+        raw_text = ""
+        if update.message and update.message.text:
+            raw_text = norm(update.message.text.strip())
+        is_activate = raw_text in ("تفعيل البوت", "تفعيل الجروب", "تفعيل")
+        if not is_activate:
+            data_quick = load_data()
+            allowed_quick = data_quick.get("allowed_groups", {})
+            if str(chat.id) not in allowed_quick:
+                return
 
     if update.message.text:
         text = update.message.text.strip()

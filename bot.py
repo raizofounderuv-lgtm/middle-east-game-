@@ -7,8 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID        = int(os.environ.get("ADMIN_ID", "0"))
-REQUIRED_GROUP  = int(os.environ.get("REQUIRED_GROUP", "0"))  # جروب الصانع — شرط للتسجيل والاستمرار
+ADMIN_ID        = int(os.environ.get("ADMIN_ID") or "0")
+REQUIRED_GROUP  = int(os.environ.get("REQUIRED_GROUP") or "0")  # جروب الصانع — شرط للتسجيل والاستمرار
 DATA_FILE  = "game_data.json"
 MAP_FILE   = "map_base.png"
 FLAGS_DIR  = "flags"
@@ -3010,6 +3010,14 @@ async def send_private_or_queue(bot, data, uid: int, text: str, reply_markup=Non
         return False
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # تجاهل الرسائل من الجروبات غير المفعّلة بصمت تام
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        data_quick = load_data()
+        allowed_quick = data_quick.get("allowed_groups", {})
+        if str(chat.id) not in allowed_quick:
+            return
+
     if update.message.text:
         text = update.message.text.strip()
     elif update.message.caption:
@@ -3022,6 +3030,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = load_data()
     clean_old_requests(data)
     ntext = norm(text)  # نسخة منقحة للمقارنة
+
+    # ======= تجاهل الرسائل غير الأوامر بصمت =======
+    # الكلمات الأولى المعروفة كأوامر
+    KNOWN_PREFIXES = {
+        "انضم","انشاء","سجلني","العب","كودي","الكود","id","ايدي","ايد","معرف",
+        "كوده","كودها","كودهم","دولته","دولتها","دولتهم","حالته","وضعه","وضعي",
+        "حاله","دولتي","بناء","انشئ","ابني","جمع","اجمع","حصاد","احصد",
+        "سوق","متجر","السلاح","اسلحه","اسطولي","الاسطول","اسطول","سفينه","سفينة",
+        "اضرب","استخدم","العاصمه","غزو","دمج","فصل","تحرير","اهدي","تجنيد",
+        "هجوم","بيع","شراء","تعيين","اقاله","اقالة","اعلن","اعلان","معاهده",
+        "معاهدة","تجسس","جاسوس","احمي","الغاء","تحويل","انشاء","دعوه","طرد",
+        "مغادره","حل","حلف","جيش","استعمر","احصد","ثوره","ثورة","انتفاضه",
+        "استقلال","مجلس","وزراء","وزارتي","الوزراء","مهرجان","ارضي","تحصين",
+        "قبول","رفض","دولي","امبراطوريتي","اراضيي","ممتلكاتي","المتصدرين",
+        "الترتيب","قائمه","الدول","خريطه","الخريطه","بورصة","البورصة","الاسواق",
+        "سجل","احداث","الحدث","البنك","بنك","قرض","ديوني","قروضي","ديون","سداد",
+        "مساعده","اوامر","help","cocg","المضائق","جيشي","قواتي","تسليحي","عتادي",
+        "تعديل","غير","تحديث","علم","تعيين","اغلق","افتح","مضيق","نشره","نشرة",
+        "تفعيل","الغاء","احصائيات","إحصائيات","الاحلاف","قائمة","ادمن","admin",
+        "حذف","تجميد","رفع","منح","اعاده","اعادة","اضف","توبيك","ايقاف","فك",
+        "تحرير","استقلال","ثورة","حمايه","حماية","مستعمره","مستعمرة","تحالف",
+    }
+    # فحص لو الرسالة أمر معروف
+    first_word = ntext.split()[0] if ntext.split() else ""
+    # استثناء: لو اللاعب في حالة تسجيل نشطة — لا نتجاهل
+    in_registration = uid in REGISTRATION_STATE
+    if not in_registration and not is_admin(uid):
+        if first_word not in KNOWN_PREFIXES and ntext not in KNOWN_PREFIXES:
+            return  # رسالة عادية — تجاهل بصمت
 
     # ======= فحص التجميد — الأدمن مستثنى =======
     if not is_admin(uid):
@@ -3039,22 +3076,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not allowed:
             # مفيش جروب مفعّل — البوت متوقف
             return
-        in_group = await is_group_member(context.bot, uid, data)
-        if not in_group:
-            msg = (
-                f"🚫 *البوت متاح فقط لأعضاء الجروب الرسمي!*\n{sep()}\n"
-                f"انضم للجروب الرسمي عشان تكمل اللعب. ✅"
-            ) if REQUIRED_GROUP != 0 else (
-                f"🚫 *البوت متاح فقط لأعضاء الجروب الرسمي!*\n{sep()}\n"
-                f"انضم للجروب أولاً ثم ابعت أي أمر. ✅"
-            )
-            await update.message.reply_text(
-                msg,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🏰 انضم للجروب الرسمي", url="https://t.me/abdeen_cocg")
-                ]]),
-                parse_mode="Markdown")
-            return
+        # لو الرسالة جاية من داخل جروب مفعّل — مش محتاج فحص عضوية
+        chat_id_str = str(update.effective_chat.id)
+        if chat_id_str not in allowed:
+            in_group = await is_group_member(context.bot, uid, data)
+            if not in_group:
+                msg = (
+                    f"🚫 *البوت متاح فقط لأعضاء الجروب الرسمي!*\n{sep()}\n"
+                    f"انضم للجروب الرسمي عشان تكمل اللعب. ✅"
+                ) if REQUIRED_GROUP != 0 else (
+                    f"🚫 *البوت متاح فقط لأعضاء الجروب الرسمي!*\n{sep()}\n"
+                    f"انضم للجروب أولاً ثم ابعت أي أمر. ✅"
+                )
+                await update.message.reply_text(
+                    msg,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🏰 انضم للجروب الرسمي", url="https://t.me/abdeen_cocg")
+                    ]]),
+                    parse_mode="Markdown")
+                return
 
     # ======= إرسال الإشعارات المعلقة =======
     pending_notifs = data.get("pending_notifications", {}).get(str(uid), [])
@@ -3150,7 +3190,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ======= تعديل العلم — اللاعب يرفع علمه الجديد =======
-    if update.message.photo and ntext in ["تعديل علمي","غير علمي","تحديث علمي","علم جديد"]:
+    # حالة 1: صورة مع caption يحتوي على الأمر
+    if update.message.photo and ntext in ["تعديل علمي","غير علمي","تحديث علمي","علم جديد","تعيين العلم"]:
         p = get_player(data, uid)
         if not p:
             await update.message.reply_text("❌ مش مسجل — انشئ دولة أولاً."); return
@@ -3165,7 +3206,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ff    = await context.bot.get_file(photo.file_id)
             await ff.download_to_drive(flag_path)
             save_data(data)
-            # ابحث عن المستعمرات والمحتلات — الخريطة بتعرض علم المحتل عليهم
             my_name = p["country_name"]
             affected = []
             for _, op in data["players"].items():
@@ -3184,6 +3224,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Flag update error: {e}")
             await update.message.reply_text("❌ حصل خطأ أثناء رفع العلم، جرب مرة ثانية.")
         return
+
+    # حالة 2: كتب الأمر بدون صورة — نطلب منه يبعت الصورة
+    if not update.message.photo and ntext in ["تعديل علمي","غير علمي","تحديث علمي","علم جديد","تعيين العلم"]:
+        p = get_player(data, uid)
+        if not p:
+            await update.message.reply_text("❌ مش مسجل — انشئ دولة أولاً."); return
+        REGISTRATION_STATE[uid] = {
+            "step": "waiting_flag_edit",
+            "started_at": time.time(),
+        }
+        await update.message.reply_text(
+            f"🏳️ *تعديل علم {p['country_name']}*\n{sep()}\n"
+            f"ابعت صورة العلم الجديد الآن 🖼️",
+            parse_mode="Markdown")
+        return
+
+    # حالة 3: في state انتظار علم تعديل وبعت صورة
+    if update.message.photo and uid in REGISTRATION_STATE:
+        state = REGISTRATION_STATE.get(uid, {})
+        if state.get("step") == "waiting_flag_edit":
+            if time.time() - state["started_at"] > 300:
+                REGISTRATION_STATE.pop(uid, None)
+                await update.message.reply_text("⏰ انتهت المهلة. اكتب `تعيين العلم` من جديد.", parse_mode="Markdown"); return
+            p = get_player(data, uid)
+            if not p:
+                REGISTRATION_STATE.pop(uid, None); return
+            region    = p["region"]
+            flag_path = os.path.join(FLAGS_DIR, f"{region}.png")
+            backup    = os.path.join(FLAGS_DIR, f"{region}_original.png")
+            try:
+                import shutil
+                if os.path.exists(flag_path) and not os.path.exists(backup):
+                    shutil.copy2(flag_path, backup)
+                photo = update.message.photo[-1]
+                ff    = await context.bot.get_file(photo.file_id)
+                await ff.download_to_drive(flag_path)
+                save_data(data)
+                REGISTRATION_STATE.pop(uid, None)
+                my_name = p["country_name"]
+                affected = []
+                for _, op in data["players"].items():
+                    ctrl = op.get("occupied_by") or op.get("colony_of")
+                    if ctrl == my_name:
+                        affected.append(op["country_name"].replace(" (محتلة)","").replace(" (مستعمرة)",""))
+                extra_txt = f"\n🏴 علمك يظهر أيضاً على: {', '.join(affected[:5])}" if affected else ""
+                await update.message.reply_text(
+                    f"🏳️ *تم تحديث علم {p['country_name']}!*\n{sep()}\n"
+                    f"علمك الجديد سيظهر على الخريطة ✅{extra_txt}",
+                    parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Flag update error: {e}")
+                await update.message.reply_text("❌ حصل خطأ أثناء رفع العلم، جرب مرة ثانية.")
+            return
 
     # ======= انشاء دولة =======
     # ======= انضم — نظام التسجيل الجديد =======
@@ -3240,6 +3333,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ======= معالجة الريبلاي — خطوات التسجيل =======
     reply_to = update.message.reply_to_message
+    # fallback: لو اللاعب في waiting_flag وبعت صورة بدون ريبلاي — نقبلها
+    if uid in REGISTRATION_STATE and update.message.photo and not reply_to:
+        state = REGISTRATION_STATE[uid]
+        if state.get("step") == "waiting_flag":
+            reply_to = type("FakeReply", (), {"message_id": state["flag_msg_id"]})()
     if reply_to and uid in REGISTRATION_STATE:
         state = REGISTRATION_STATE[uid]
         # تحقق من انتهاء الوقت

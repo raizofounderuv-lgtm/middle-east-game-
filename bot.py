@@ -54,6 +54,7 @@ FLAG_SIZE_OVERRIDE = {
     "جورجيا":        85,
     "اذربيجان":      85,
     "تونس":          85,
+    "الامارات":      75,
 }
 
 # ==================== قروض البنك الدولي ====================
@@ -1267,6 +1268,9 @@ def get_player(d, uid):
             "last_pop_update": 0,
             "harvest_reminded": 0,
             "last_build": 0,
+            "cabinet": {},
+            "fleet": {},
+            "merged_regions": [],
         }
         for k, v in defaults.items():
             if k not in p:
@@ -1580,6 +1584,33 @@ def generate_map(players, d):
                 for ox, oy in [(-1,1),(1,1),(-1,-1),(1,-1)]:
                     draw.text((cx+ox, ty+oy), label, fill="black", anchor="mt", font=font_label)
                 draw.text((cx, ty), label, fill="white", anchor="mt", font=font_label)
+
+    # ===== المناطق المدمجة — رسم علم اللاعب عليها =====
+    for uid, p in players.items():
+        merged = p.get("merged_regions", [])
+        if not merged: continue
+        player_region = p.get("region", "")
+        flag_path = os.path.join(FLAGS_DIR, f"{player_region}.png")
+        if not os.path.exists(flag_path): continue
+        for mregion in merged:
+            if mregion not in REGION_COORDS: continue
+            cx, cy = REGION_COORDS[mregion][0]
+            size   = FLAG_SIZE_OVERRIDE.get(mregion, FLAG_SIZE_SMALL)
+            try:
+                flag = Image.open(flag_path).convert("RGBA")
+                f2   = flag.resize((size, int(size * 0.6)), Image.LANCZOS)
+                fw, fh = f2.size
+                img.paste(f2, (cx - fw//2, cy - fh//2), f2)
+                draw.rectangle([cx-fw//2-2, cy-fh//2-2, cx+fw//2+2, cy+fh//2+2],
+                               outline="#2E8B57", width=2)  # إطار أخضر للمدموجة
+                # اسم المنطقة
+                ty = cy + fh//2 + 6
+                for ox, oy in [(-1,1),(1,1)]:
+                    draw.text((cx+ox, ty+oy), mregion, fill="black", anchor="mt", font=font_small)
+                draw.text((cx, ty), mregion, fill="white", anchor="mt", font=font_small)
+                flag.close(); f2.close()
+            except Exception as e:
+                logging.warning(f"Merged region flag error {mregion}: {e}")
 
     # ===== المناطق الفارغة المحتلة (غزو) =====
     unoccupied = d.get("unoccupied_territories", {})
@@ -3674,16 +3705,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         traitor = " 🗡️خائن" if p.get("traitor") else ""
         xp_bar  = progress_bar(xp - lvl["xp"], (nxt["xp"] - lvl["xp"]) if nxt else (xp - lvl["xp"] or 1))
 
-        # حساب الاقتصاد
-        num_proj_s = sum(facs.values()) + sum(crops_p.values())
-        base_t     = p.get("territories",1)*500 + 1000
-        econ       = base_t + num_proj_s*300 + infra*1500 + sum(
-            RESOURCE_FACILITIES.get(r,{}).get("amount",0)*c*CROP_SELL_PRICE.get(r,0)
-            for r,c in facs.items()
-        ) + sum(
-            FARM_CROPS.get(cr,{}).get("amount",0)*cn*CROP_SELL_PRICE.get(cr,0)
-            for cr,cn in crops_p.items()
+        # حساب الاقتصاد — يعكس الحصاد الفعلي بدقة
+        region_p   = p.get("region", "")
+        preferred_p = list(REGION_PREFERRED_CROPS.get(region_p, []))
+        for mr in p.get("merged_regions", []):
+            for crop in REGION_PREFERRED_CROPS.get(mr, []):
+                if crop not in preferred_p: preferred_p.append(crop)
+        # المزارع — مع بونص المحاصيل المفضلة
+        farm_income = sum(
+            p.get("crops_amount",{}).get(cr, FARM_CROPS.get(cr,{}).get("amount",10))
+            * (1.5 if cr in preferred_p else 1.0)
+            * cn * CROP_SELL_PRICE.get(cr, 20)
+            for cr, cn in crops_p.items()
         )
+        # المنشآت — مع مضاعفات
+        oil_ports_e  = facs.get("ميناء_نفطي", 0)
+        oil_bonus_e  = min(0.60, oil_ports_e * 0.20)
+        solar_e      = facs.get("طاقة_شمسية", 0)
+        solar_base_e = min(0.32, solar_e * 0.08)
+        solar_xtra_e = RESOURCE_FACILITIES.get("طاقة_شمسية",{}).get("regions_bonus_extra",0)
+        solar_bon_e  = solar_base_e + (solar_xtra_e * solar_e if region_p in RESOURCE_FACILITIES.get("طاقة_شمسية",{}).get("regions_bonus",[]) else 0)
+        semi_e       = min(0.90, facs.get("اشباه_موصلات",0) * 0.30)
+        space_e      = min(0.60, facs.get("برنامج_فضائي",0) * 0.20)
+        cab_e        = p.get("cabinet", {})
+        min_fac_e    = 0.15 if cab_e.get("وزير_تقنية") else 0.0
+        min_farm_e   = 0.20 if cab_e.get("وزير_زراعة") else 0.0
+        ev_eff_e     = get_world_event_effects(data)
+        ev_harv_e    = ev_eff_e.get("harvest_bonus", 0.0)
+        ev_tax_e     = ev_eff_e.get("tax_bonus", 0.0)
+        total_bon_e  = solar_bon_e + semi_e + space_e + ev_harv_e + min_fac_e
+        # منشآت صناعية
+        fac_income = sum(
+            RESOURCE_FACILITIES.get(r,{}).get("amount",0) * c
+            * CROP_SELL_PRICE.get(r, 0)
+            * (1 + oil_bonus_e if r in ("نفط","غاز") else 1)
+            for r, c in facs.items()
+            if r not in ("ميناء_نفطي","طاقة_شمسية")
+        )
+        num_proj_s   = sum(facs.values()) + sum(crops_p.values())
+        base_t       = p.get("territories",1)*500 + 1000
+        terr_inc_e   = int((base_t + num_proj_s*300 + infra*1500) * (1 + total_bon_e) * (1 + ev_tax_e))
+        # ضرائب المستعمرات
+        colony_est = 0
+        for _, cp2 in data["players"].items():
+            if cp2.get("colony_of") == p["country_name"]:
+                ports_e   = facs.get("ميناء",0)
+                tax_r_e   = min(0.80, 0.40 + ports_e*0.15 + (0.10 if "هيمنة_اقتصادية" in get_perks(xp) else 0))
+                col_inc_e, _, _ = calc_colony_harvest(cp2)
+                colony_est += int(col_inc_e * tax_r_e)
+        econ = int(farm_income * (1+min_farm_e) + fac_income * (1+total_bon_e) + terr_inc_e + colony_est)
         total_tons = sum(
             FARM_CROPS.get(c,{}).get("amount",0)*n*(1.5 if c in REGION_PREFERRED_CROPS.get(p["region"],[]) else 1)
             for c,n in crops_p.items()
@@ -3852,6 +3922,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kbd   = []
         prev_tier = -1
         for fac_id, fc in all_facs:
+            # تجاهل المنشآت المقيدة بمناطق غير منطقة اللاعب
+            if fc.get("coastal_only") and region not in COASTAL_REGIONS:
+                continue
+            if fc.get("regions") and region not in fc["regions"]:
+                continue
             infra_req = get_facility_infra_req(fac_id, region)
             locked    = infra < infra_req
             tier      = fc.get("infra_req", 0)
@@ -4768,6 +4843,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🕊️ *الحروب موقوفة حالياً — الغزو محظور!*", parse_mode="Markdown"); return
         ok, err = check_sovereignty(p, "احتلال")
         if not ok: await update.message.reply_text(err, parse_mode="Markdown"); return
+        if get_level(p.get("xp", 0))["level"] < 3:
+            await update.message.reply_text(
+                f"🔒 *الغزو يتطلب مستوى 3 (مدينة) على الأقل!*\n"
+                f"مستواك الحالي: {get_level(p.get('xp',0))['emoji']} {get_level(p.get('xp',0))['name']}\n"
+                f"اجمع المزيد من XP للوصول لمستوى المدينة.",
+                parse_mode="Markdown"); return
         target_name = ntext.replace("غزو","").strip()
         # تحقق إن الدولة غير مأهولة (مفيش لاعب)
         target_region = None
@@ -4794,6 +4875,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # شروط
         cost = 10000
         min_army = 200
+        if get_level(p.get("xp", 0))["level"] < 3:
+            await update.message.reply_text(
+                f"🔒 *الغزو يتطلب مستوى 3 (مدينة) على الأقل!*\n"
+                f"مستواك الحالي: {get_level(p.get('xp',0))['emoji']} {get_level(p.get('xp',0))['name']}\n"
+                f"اجمع المزيد من XP للوصول لمستوى المدينة.",
+                parse_mode="Markdown"); return
         if p["army"] < min_army:
             await update.message.reply_text(f"❌ تحتاج جيش *{min_army:,}* جندي على الأقل! عندك {p['army']:,}", parse_mode="Markdown"); return
         if p["gold"] < cost:
@@ -5181,6 +5268,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tuid, tp = find_by_name(data, tname)
         if not tp: await update.message.reply_text(f"❌ مش لاقي '{tname}'."); return
         if tuid == str(uid): await update.message.reply_text("❌ مينفعش تهاجم نفسك!"); return
+        # حماية الدول الجديدة — مش يتهاجموا قبل ما يوصلوا لفل 3 (مدينة)
+        tp_level = get_level(tp.get("xp", 0))["level"]
+        if tp_level < 3 and not tp.get("occupied_by") and not tp.get("colony_of"):
+            tp_lvl_info = get_level(tp.get("xp", 0))
+            await update.message.reply_text(
+                f"🛡️ *{tp['country_name']}* محمية!\\n{sep()}\\n"
+                f"الدول الجديدة محمية حتى تصل لمستوى *3 (مدينة)*\\n"
+                f"مستواهم الحالي: {tp_lvl_info['emoji']} {tp_lvl_info['name']} (Lv.{tp_level})\\n"
+                f"انتظر حتى يكبروا أو هاجم دولة أكبر!",
+                parse_mode="Markdown"); return
         # منع الهجوم على أعضاء الحلف المشترك
         orgs_check = data.get("organizations", {})
         in_same_org_attack = any(
@@ -8183,17 +8280,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⏳ انتظر *{left}* ثانية قبل بناء منشأة أخرى.",
                 parse_mode="Markdown"); return
-        f         = RESOURCE_FACILITIES[resource]
+        fac       = RESOURCE_FACILITIES[resource]
         infra     = p.get("infrastructure", 0)
         region    = p.get("region", "")
         infra_req = get_facility_infra_req(resource, region)
         if infra < infra_req:
             await query.edit_message_text(
-                f"🔒 *{f['name']}* تحتاج بنية تحتية *Lv.{infra_req}*\n"
+                f"🔒 *{fac['name']}* تحتاج بنية تحتية *Lv.{infra_req}*\n"
                 f"بنيتك الحالية: Lv.{infra}\n"
                 f"طور بنيتك أولاً بأمر `بناء بنية تحتية`",
                 parse_mode="Markdown"); return
-        cost = f["base_cost"]
+        # فحص coastal_only (مزرعة سمكية)
+        if fac.get("coastal_only") and region not in COASTAL_REGIONS:
+            await query.edit_message_text(
+                f"🌊 *{fac['name']}* متاحة للدول الساحلية فقط!\n"
+                f"منطقتك ({region}) ليست ساحلية.",
+                parse_mode="Markdown"); return
+        # فحص regions (ميناء نفطي وغيره)
+        if fac.get("regions") and region not in fac["regions"]:
+            await query.edit_message_text(
+                f"📍 *{fac['name']}* متاحة فقط لمناطق محددة!\n"
+                f"منطقتك ({region}) غير مؤهلة لهذه المنشأة.",
+                parse_mode="Markdown"); return
+        cost = fac["base_cost"]
         if p["gold"] < cost:
             await query.edit_message_text(f"❌ محتاج {cost:,}¥. عندك {p['gold']:,}."); return
         data["players"][str(uid)]["gold"] -= cost
@@ -8203,8 +8312,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["players"][str(uid)]["last_build"] = time.time()
         leveled_up, new_lvl = add_xp(data, uid, 120)
         save_data(data)
-        special_txt = f"\n✨ {f['special']}" if f.get("special") else f"\n📦 +{f['amount']} {resource}/دورة"
-        msg = (f"🏭 *تم البناء!*\n{'─'*28}\n{f['emoji']} *{f['name']}*"
+        special_txt = f"\n✨ {fac['special']}" if fac.get("special") else f"\n📦 +{fac['amount']} {resource}/دورة"
+        msg = (f"🏭 *تم البناء!*\n{'─'*28}\n{fac['emoji']} *{fac['name']}*"
                f"{special_txt}\n💰 {p['gold']-cost:,}¥ متبقي\n⭐+120")
         if leveled_up: msg += f"\n🎊 {new_lvl['name']} {new_lvl['emoji']}"
         await query.edit_message_text(msg, parse_mode="Markdown")

@@ -37,23 +37,23 @@ WAR_EXPIRE     = HOUR_REAL * 48  # حرب تنتهي تلقائياً بعد 48 
 MARKET_TTL     = HOUR_REAL * 72  # عروض السوق تنتهي بعد 72 ساعة لعبة
 MAX_MARKET_PER_PLAYER = 5        # حد أقصى عروض في السوق
 
-FLAG_SIZE_MAIN  = 200
-FLAG_SIZE_SMALL = 100
+FLAG_SIZE_MAIN  = 100
+FLAG_SIZE_SMALL = 50
 
 # دول صغيرة المساحة — علم أصغر عشان ما يغطيش الدولة
 FLAG_SIZE_OVERRIDE = {
-    "قطر":           120,
-    "لبنان":         120,
-    "قبرص":          120,
-    "الكويت":        130,
-    "الاردن":        150,
-    "فلسطين":        120,
-    "جيبوتي":        100,
-    "ارتريا":        120,
-    "ارمينيا":       120,
-    "جورجيا":        130,
-    "اذربيجان":      130,
-    "تونس":          130,
+    "قطر":           60,
+    "لبنان":         60,
+    "قبرص":          60,
+    "الكويت":        65,
+    "الاردن":        75,
+    "فلسطين":        60,
+    "جيبوتي":        50,
+    "ارتريا":        60,
+    "ارمينيا":       60,
+    "جورجيا":        65,
+    "اذربيجان":      65,
+    "تونس":          65,
 }
 
 # ==================== قروض البنك الدولي ====================
@@ -4690,7 +4690,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🕊️ *الحروب موقوفة حالياً — الغزو محظور!*", parse_mode="Markdown"); return
         ok, err = check_sovereignty(p, "احتلال")
         if not ok: await update.message.reply_text(err, parse_mode="Markdown"); return
-        target_name = ntext.replace("احتلال","").strip()
+        target_name = ntext.replace("غزو","").strip()
         # تحقق إن الدولة غير مأهولة (مفيش لاعب)
         target_region = None
         for r in AVAILABLE_REGIONS:
@@ -5982,26 +5982,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ntext.startswith("اعلن حرب علي ") or ntext.startswith("اعلان حرب علي "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
+        ok, err = check_sovereignty(p, "اعلن_حرب")
+        if not ok: await update.message.reply_text(err, parse_mode="Markdown"); return
         if get_level(p.get("xp",0))["level"] < 3:
             await update.message.reply_text("🔒 إعلان الحرب يتطلب مستوى *3 (مدينة)* على الأقل.", parse_mode="Markdown"); return
         tname = ntext.replace("اعلن حرب علي","").replace("اعلان حرب علي","").strip()
         tuid, tp = find_by_name(data, tname)
         if not tp: await update.message.reply_text(f"❌ مش لاقي دولة '{tname}'."); return
         if tuid == str(uid): await update.message.reply_text("❌ مينفعش تعلن حرب على نفسك!"); return
-        already = any(norm(w) == norm(tp["country_name"].replace(" (محتلة)","").replace(" (مستعمرة)","")) for w in p.get("war_declared",[]))
+        tp_clean = tp["country_name"].replace(" (محتلة)","").replace(" (مستعمرة)","")
+        # فحص الحلف المشترك
+        in_same_org = any(
+            p["country_name"] in ov["members"] and tp_clean in ov["members"]
+            for ov in data.get("organizations",{}).values()
+        )
+        if in_same_org:
+            await update.message.reply_text(f"❌ *{tp_clean}* حليفك — لا يمكن إعلان الحرب عليه! 🤝", parse_mode="Markdown"); return
+        # فحص معاهدة السلام
+        peace = p.get("peace_treaties", {})
+        for pname, pexpiry in list(peace.items()):
+            if norm(pname) == norm(tp_clean) and time.time() < pexpiry:
+                rem_h = int((pexpiry - time.time()) // 3600)
+                await update.message.reply_text(
+                    f"🕊️ *معاهدة سلام سارية!*\n{sep()}\n"
+                    f"معاهدتك مع *{tp_clean}* تنتهي بعد *{rem_h}* ساعة\n"
+                    f"لا يمكن إعلان الحرب قبل انتهائها.",
+                    parse_mode="Markdown"); return
+        # فحص إعلان موجود
+        already = any(norm(w) == norm(tp_clean) for w in p.get("war_declared",[]))
         if already:
-            await update.message.reply_text(f"⚔️ إعلان الحرب على *{tp['country_name']}* سارٍ بالفعل.", parse_mode="Markdown"); return
-        data["players"][str(uid)].setdefault("war_declared",[]).append(tp["country_name"].replace(" (محتلة)","").replace(" (مستعمرة)",""))
+            await update.message.reply_text(f"⚔️ إعلان الحرب على *{tp_clean}* سارٍ بالفعل.", parse_mode="Markdown"); return
+        data["players"][str(uid)].setdefault("war_declared",[]).append(tp_clean)
+        # أضف الطرفين في حالة الحرب فوراً
+        if tp_clean not in p.get("at_war",[]):
+            data["players"][str(uid)].setdefault("at_war",[]).append(tp_clean)
+        if p["country_name"] not in tp.get("at_war",[]):
+            data["players"][tuid].setdefault("at_war",[]).append(p["country_name"])
         save_data(data)
+        my_capital = p.get("capital","")
+        cap_txt = f" من *{my_capital}*" if my_capital else ""
         await update.message.reply_text(
             f"📜 *إعلان حرب رسمي!*\n{sep()}\n"
-            f"أعلنت الحرب رسمياً على *{tp['country_name']}*\n"
+            f"أعلنت الحرب رسمياً على *{tp_clean}*\n"
             f"⚔️ هجماتك عليهم +15% قوة\n"
             f"⚠️ العالم لاحظ هذا الإعلان!", parse_mode="Markdown")
         try:
+            def_capital = tp.get("capital","")
+            cap_def_txt = f" على *{def_capital}*" if def_capital else ""
             await context.bot.send_message(chat_id=int(tuid),
                 text=f"📜 *إعلان حرب!*\n{sep()}\n"
-                     f"*{p['country_name']}* أعلنت الحرب عليك رسمياً!\n"
+                     f"*{p['country_name']}*{cap_txt} أعلنت الحرب عليك{cap_def_txt} رسمياً!\n"
                      f"استعد للمواجهة ⚔️", parse_mode="Markdown")
         except: pass
         return
@@ -6192,6 +6222,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ntext.startswith("احمي "):
         p = get_player(data, uid)
         if not p: await update.message.reply_text("❌ مش مسجل."); return
+        ok, err = check_sovereignty(p, "احمي")
+        if not ok: await update.message.reply_text(err, parse_mode="Markdown"); return
+        if "قوة_عظمى" not in get_perks(p.get("xp",0)):
+            await update.message.reply_text("🔒 الحماية تتطلب مستوى *7 (دولة كبرى)* على الأقل.", parse_mode="Markdown"); return
         tname = ntext.replace("احمي","").strip()
         tuid, tp = find_by_name(data, tname)
         if not tp:
@@ -6202,7 +6236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"❌ *{tp['country_name']}* محمية بالفعل بواسطة *{tp['protected_by']}*.",
                 parse_mode="Markdown"); return
-        if p["country_name"] in tp.get("protects", []):
+        if tp["country_name"] in p.get("protects", []):
             await update.message.reply_text(f"❌ بتحمي *{tp['country_name']}* بالفعل.", parse_mode="Markdown"); return
 
         # لو الدولة تحت احتلالك — حماية فورية بدون موافقة
@@ -7198,7 +7232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• لازم تكون على حدود الهدف أو ساحلياً\n"
             f"• الانتصار = غنيمة مثاقيل + أرض جديدة\n"
             f"• لو جيش العدو وصل 0 → *غزو كامل*\n\n"
-            f"*إعلان الحرب:* `اعلن حرب على [دولة]` — Lv.4+\n"
+            f"*إعلان الحرب:* `اعلن حرب علي [دولة]` — Lv.3+ (إجباري)\n"
             f"يعطيك +15% قوة هجوم\n\n"
             f"*الأسلحة:* `شراء اسلحة`\n"
             f"سيف → بندقية → مدفع → صاروخ → قنبلة ذرية ☢️\n"
@@ -7299,7 +7333,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━ ⚔️ *الجيش والحرب* ━━\n"
             f"`تجنيد [عدد]` | `جيشي`\n"
             f"`هجوم على [دولة]`\n"
-            f"`اعلن حرب على [دولة]` — Lv.4+ (+15% هجوم)\n"
+            f"`اعلن حرب علي [دولة]` — Lv.3+ (إجباري قبل الهجوم)\n"
             f"`اضرب قنبلة_ذرية على [دولة]` — ☢️\n\n"
             f"━━ 🔫 *الأسلحة* ━━\n"
             f"`شراء اسلحة` | `شراء [سلاح] [عدد]`\n\n"
@@ -7803,9 +7837,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except: pass
             return
 
-        # ======= فك غزو — تحرير قسري (أدمن) =======
-        if ntext.startswith("فك غزو ") or ntext.startswith("فك_غزو "):
-            country_q = ntext.replace("فك احتلال","").replace("فك_احتلال","").strip()
+        # ======= فك احتلال — تحرير قسري (أدمن) =======
+        if ntext.startswith("فك احتلال ") or ntext.startswith("فك_احتلال ") or ntext.startswith("فك غزو "):
+            country_q = ntext.replace("فك احتلال","").replace("فك_احتلال","").replace("فك غزو","").strip()
             tuid, tp = find_by_name(data, country_q)
             if not tp: await update.message.reply_text(f"❌ مش لاقي '{country_q}'."); return
             occ  = tp.get("occupied_by")

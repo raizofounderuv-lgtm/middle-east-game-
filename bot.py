@@ -273,17 +273,24 @@ REGION_FERTILITY = {
 # حد أقصى للمزارع حسب مستوى البنية التحتية
 FARM_MAX_PER_INFRA = {0:3, 1:6, 2:12, 3:20, 4:30, 5:45, 6:60, 7:80}
 def get_max_farms(infra, region="", merged_regions=None):
-    """إجمالي أقصى عدد مزارع — يعتمد على خصوبة المنطقة + المناطق المدمجة"""
+    """إجمالي أقصى عدد مزارع — يعكس الخصوبة من لفل 1 + البنية التحتية"""
     fertility = REGION_FERTILITY.get(region, 5)
     # أضف نسبة من خصوبة كل منطقة مدمجة
     if merged_regions:
         for r in merged_regions:
             fertility += REGION_FERTILITY.get(r, 3) * 0.5
         fertility = round(fertility)
-    base = 5 + round((fertility - 1) * 1.1)
-    limit = base + (infra - 1) * 10 if infra >= 1 else base - 10
+    # base يعكس الخصوبة الطبيعية بوضوح
+    # fertility 1→3  |  5→8  |  9→12
+    base = 2 + round(fertility * 1.1)
+    # infra=0: الخصوبة الطبيعية فقط (بدون بنية تحتية)
+    if infra == 0:
+        return max(3, base)
+    # infra 1-6: +8 مزارع لكل لفل بنية تحتية
+    limit = base + infra * 8
+    # infra 7+: +15 مزرعة لكل لفل
     if infra >= 7:
-        limit = base + 60 + (infra - 7) * 20
+        limit = base + 6 * 8 + (infra - 6) * 15
     return max(3, limit)
 
 # ==================== الكوارث ====================
@@ -1145,6 +1152,8 @@ def load_data():
         "ذهب":    {"price": 150, "trend": 0},
     })
     d.setdefault("last_stock_update", 0)
+    d.setdefault("unoccupied_territories", {})  # مناطق فارغة مغزوة {region: {occupied_by, occupied_at}}
+    d.setdefault("weapon_market", [])            # سوق الأسلحة بين اللاعبين
     return d
 
 
@@ -1170,6 +1179,7 @@ def get_facility_infra_req(fac_id, region):
 
 def norm(t):
     """تطبيع النص — ة↔ه، همزات، ألف مقصورة"""
+    if t is None: return ""
     t = t.strip()
     t = t.replace("أ","ا").replace("إ","ا").replace("آ","ا")
     t = t.replace("ة","ه")
@@ -1571,7 +1581,43 @@ def generate_map(players, d):
                     draw.text((cx+ox, ty+oy), label, fill="black", anchor="mt", font=font_label)
                 draw.text((cx, ty), label, fill="white", anchor="mt", font=font_label)
 
-    # ===== المضائق =====
+    # ===== المناطق الفارغة المحتلة (غزو) =====
+    unoccupied = d.get("unoccupied_territories", {})
+    for uregion, uinfo in unoccupied.items():
+        if uregion not in REGION_COORDS: continue
+        occupier_name = uinfo.get("occupied_by", "")
+        if not occupier_name: continue
+        # ابحث عن منطقة الغازي عشان نجيب علمه
+        occupier_region = None
+        for _, op in players.items():
+            op_clean = op.get("country_name","").replace(" (محتلة)","").replace(" (مستعمرة)","")
+            if op_clean == occupier_name or op.get("country_name") == occupier_name:
+                occupier_region = op.get("region"); break
+        if not occupier_region: continue
+        flag_path = os.path.join(FLAGS_DIR, f"{occupier_region}.png")
+        if not os.path.exists(flag_path): continue
+        # ارسم العلم في الموقع الأول فقط
+        coords = REGION_COORDS[uregion]
+        cx, cy = coords[0]
+        size   = FLAG_SIZE_OVERRIDE.get(uregion, FLAG_SIZE_SMALL)
+        try:
+            flag = Image.open(flag_path).convert("RGBA")
+            f2   = flag.resize((size, int(size*0.6)), Image.LANCZOS)
+            fw, fh = f2.size
+            img.paste(f2, (cx-fw//2, cy-fh//2), f2)
+            # إطار أحمر مع نقطة حمراء
+            draw.rectangle([cx-fw//2-2, cy-fh//2-2, cx+fw//2+2, cy+fh//2+2],
+                           outline="#8B4513", width=2)
+            draw.ellipse([cx+fw//2-8, cy-fh//2-8, cx+fw//2+8, cy-fh//2+8],
+                         fill="#8B4513", outline="white", width=1)
+            # اسم المنطقة صغير
+            ty = cy + fh//2 + 6
+            for ox, oy in [(-1,1),(1,1)]:
+                draw.text((cx+ox, ty+oy), uregion, fill="black", anchor="mt", font=font_small)
+            draw.text((cx, ty), uregion, fill="white", anchor="mt", font=font_small)
+            flag.close(); f2.close()
+        except Exception as e:
+            logging.warning(f"Unoccupied flag error {uregion}: {e}")
     strait_pos = {
         "هرمز":       (1786, 744),
         "باب المندب": (1489, 1083),
@@ -4537,7 +4583,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not p: await update.message.reply_text("❌ مش مسجل."); return
         ok, err = check_sovereignty(p, "تغيير الاسم")
         if not ok: await update.message.reply_text(err, parse_mode="Markdown"); return
-        new_name = ntext.replace("تغيير اسم دولتي","").replace("تغيير اسم","").strip()
+        # استخدم النص الأصلي للحفاظ على الأحرف
+        new_name = text.strip()
+        for prefix in ["تغيير اسم دولتي", "تغيير اسم"]:
+            if new_name.startswith(prefix):
+                new_name = new_name[len(prefix):].strip()
+                break
         if not new_name or len(new_name) < 2:
             await update.message.reply_text("❌ الاسم قصير جداً!\nمثال: `تغيير اسم دولتي الجمهورية الجديدة`", parse_mode="Markdown"); return
         if len(new_name) > 30:
@@ -4554,20 +4605,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # حدّث كل المراجع في بيانات اللاعبين الآخرين
         for puid2, pp2 in data["players"].items():
             if puid2 == str(uid): continue
-            if norm(pp2.get("occupied_by","")) == norm(old_name):
+            if norm(pp2.get("occupied_by") or "") == norm(old_name):
                 data["players"][puid2]["occupied_by"] = new_name
-            if norm(pp2.get("colony_of","")) == norm(old_name):
+            if norm(pp2.get("colony_of") or "") == norm(old_name):
                 data["players"][puid2]["colony_of"] = new_name
-            at_war2 = [new_name if norm(x)==norm(old_name) else x for x in pp2.get("at_war",[])]
+            if norm(pp2.get("protected_by") or "") == norm(old_name):
+                data["players"][puid2]["protected_by"] = new_name
+            at_war2 = [new_name if norm(x or "")==norm(old_name) else x for x in pp2.get("at_war",[])]
             data["players"][puid2]["at_war"] = at_war2
-            allies2 = [new_name if norm(x)==norm(old_name) else x for x in pp2.get("allies",[])]
+            allies2 = [new_name if norm(x or "")==norm(old_name) else x for x in pp2.get("allies",[])]
             data["players"][puid2]["allies"] = allies2
+            war_dec2 = [new_name if norm(x or "")==norm(old_name) else x for x in pp2.get("war_declared",[])]
+            data["players"][puid2]["war_declared"] = war_dec2
+            protects2 = [new_name if norm(x or "")==norm(old_name) else x for x in pp2.get("protects",[])]
+            data["players"][puid2]["protects"] = protects2
+            # peace_treaties
+            pt2 = pp2.get("peace_treaties", {})
+            if old_name in pt2:
+                pt2[new_name] = pt2.pop(old_name)
+                data["players"][puid2]["peace_treaties"] = pt2
         # حدّث الأحلاف
         for org_name, org in data.get("organizations",{}).items():
             if old_name in org["members"]:
                 org["members"] = [new_name if x==old_name else x for x in org["members"]]
             if org.get("founder") == old_name:
                 data["organizations"][org_name]["founder"] = new_name
+        # حدّث المناطق الفارغة المغزوة
+        for uregion, uinfo in data.get("unoccupied_territories", {}).items():
+            if norm(uinfo.get("occupied_by","")) == norm(old_name):
+                data["unoccupied_territories"][uregion]["occupied_by"] = new_name
+        # حدّث سوق الأسلحة
+        for entry in data.get("weapon_market", []):
+            if norm(entry.get("seller","")) == norm(old_name):
+                entry["seller"] = new_name
+        # حدّث peace_requests المعلقة
+        for req in data.get("peace_requests", {}).values():
+            if norm(req.get("from_name","")) == norm(old_name): req["from_name"] = new_name
+            if norm(req.get("to_name",""))   == norm(old_name): req["to_name"]   = new_name
         save_data(data)
         log_event(data, f"🏳️ {old_name} غيّرت اسمها إلى {new_name}", "✏️")
         await update.message.reply_text(
@@ -6469,16 +6543,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_gold += cp.get("gold",0)
                 total_terr += cp.get("territories",1)
 
-        if not occupied_list and not colony_list and not p.get("occupied_by") and not p.get("colony_of"):
+        if not occupied_list and not colony_list and not my_unoccupied and not p.get("occupied_by") and not p.get("colony_of"):
             msg += f"\n{sep()}\n💡 _لا توجد أراضٍ تابعة بعد_\n_احتل دولة واستعمرها لتوسيع نفوذك!_\n"
 
+        # المناطق الفارغة المغزوة
+        unoccupied = data.get("unoccupied_territories", {})
+        my_unoccupied = [(region, info) for region, info in unoccupied.items()
+                         if norm(info.get("occupied_by","")) == norm(my_name)]
+        if my_unoccupied:
+            msg += f"\n{sep()}\n🟤 *مناطق مغزوة — {len(my_unoccupied)} منطقة:*\n"
+            for region, info in my_unoccupied:
+                res = "، ".join(info.get("resources", [])) or "—"
+                msg += (
+                    f"  🏴 *{region}*\n"
+                    f"     🌍 الموارد: {res}\n"
+                    f"     💡 `دمج {region}` لضمها لأراضيك\n"
+                )
+                total_terr += 1
+
         # الإجمالي
-        if occupied_list or colony_list:
+        if occupied_list or colony_list or my_unoccupied:
             n_countries = 1 + len(occupied_list) + len(colony_list)
             msg += (
                 f"\n{sep()}\n"
                 f"📊 *إجمالي الإمبراطورية*\n"
-                f"🏳️ {n_countries} دولة  ⚔️ {total_army:,}  💰 {CUR}{total_gold:,}  🗺️ {total_terr}\n"
+                f"🏳️ {n_countries} دولة"
+                + (f"  🟤 {len(my_unoccupied)} منطقة مغزوة" if my_unoccupied else "")
+                + f"  ⚔️ {total_army:,}  💰 {CUR}{total_gold:,}  🗺️ {total_terr}\n"
             )
 
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -7366,7 +7457,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not org["members"] or org.get("founder") == real_name:
                     del data["organizations"][org_name]
 
+            # ── تنظيف سوق الأسلحة ──
+            data["weapon_market"] = [
+                e for e in data.get("weapon_market", [])
+                if norm(e.get("seller","")) != norm(real_name)
+            ]
+
+            # ── تنظيف طلبات السلام ──
+            data["peace_requests"] = {
+                k: v for k, v in data.get("peace_requests", {}).items()
+                if norm(v.get("from_name","")) != norm(real_name)
+                and norm(v.get("to_name","")) != norm(real_name)
+            }
+
+            # ── تنظيف دعوات الأحلاف ──
+            data["org_invites"] = {
+                k: v for k, v in data.get("org_invites", {}).items()
+                if norm(v.get("from_name","")) != norm(real_name)
+                and norm(v.get("to_name","")) != norm(real_name)
+            }
+
+            # ── تنظيف طلبات التحالف ──
+            data["alliance_requests"] = {
+                k: v for k, v in data.get("alliance_requests", {}).items()
+                if norm(v.get("from_name","")) != norm(real_name)
+                and norm(v.get("to_name","")) != norm(real_name)
+            }
+
+            # ── تنظيف المناطق الفارغة المغزوة ──
+            data["unoccupied_territories"] = {
+                k: v for k, v in data.get("unoccupied_territories", {}).items()
+                if norm(v.get("occupied_by","")) != norm(real_name)
+            }
+
+            # ── حذف الإشعارات المعلقة ──
+            data.get("pending_notifications", {}).pop(found_uid, None)
+
             save_data(data)
+            # إشعار للمحذوف لو أمكن
+            try:
+                await context.bot.send_message(
+                    chat_id=int(found_uid),
+                    text=f"⚠️ *تم حذف دولتك ({real_name}) من قِبَل الإدارة.*",
+                    parse_mode="Markdown")
+            except: pass
             await update.message.reply_text(
                 f"✅ *تم حذف {real_name}* وتنظيف كل مراجعها.",
                 parse_mode="Markdown"); return

@@ -4715,7 +4715,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(err2, parse_mode="Markdown"); return
         # شروط
         cost = 10000
-        min_army = 500
+        min_army = 200
         if p["army"] < min_army:
             await update.message.reply_text(f"❌ تحتاج جيش *{min_army:,}* جندي على الأقل! عندك {p['army']:,}", parse_mode="Markdown"); return
         if p["gold"] < cost:
@@ -4725,7 +4725,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unoccupied[target_region] = {
             "occupied_by": p["country_name"],
             "occupied_at": time.time(),
-            "facilities":  dict(REGION_RESOURCES.get(target_region, [])),
+            "resources":   list(REGION_RESOURCES.get(target_region, [])),
         }
         data["unoccupied_territories"] = unoccupied
         leveled_up, new_lvl = add_xp(data, uid, 100)
@@ -5726,13 +5726,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✊ الثورة تحتاج *{CUR}{cost:,}* لتمويل المقاومة\n"
                 f"عندك {CUR}{p['gold']:,}", parse_mode="Markdown"); return
-        # حساب نسبة النجاح — مبنية على جيش المحتلة مش على النسبة
-        # 100 جندي = 40%، 150 = 55%، 200 = 70%
         success_chance = min(0.70, 0.40 + (my_army - 100) / 100 * 0.30)
         data["players"][str(uid)]["gold"] -= cost
         success = random.random() < success_chance
+        orig = p["country_name"].replace(" (محتلة)","")
         if success:
-            orig = p["country_name"].replace(" (محتلة)","")
             army_lost = max(10, int(my_army * random.uniform(0.20, 0.35)))
             occ_army_lost = max(100, int(occ_army * random.uniform(0.25, 0.40)))
             data["players"][str(uid)]["occupied_by"]   = None
@@ -5740,9 +5738,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["players"][str(uid)]["army"]          = max(1, my_army - army_lost)
             data["players"][str(uid)]["wars_won"]      = p.get("wars_won",0) + 1
             data["players"][str(uid)]["happiness_bonus"] = min(30, p.get("happiness_bonus",0) + 20)
+            # تنظيف at_war و war_declared للطرفين
+            data["players"][str(uid)]["at_war"] = [x for x in p.get("at_war",[]) if norm(x) != norm(occupier_name)]
+            data["players"][str(uid)]["war_declared"] = [x for x in p.get("war_declared",[]) if norm(x) != norm(occupier_name)]
             if occ_uid:
                 data["players"][occ_uid]["army"] = max(0, occ_army - occ_army_lost)
                 data["players"][occ_uid]["wars_lost"] = occ_p.get("wars_lost",0) + 1
+                data["players"][occ_uid]["at_war"] = [x for x in occ_p.get("at_war",[]) if norm(x) != norm(orig)]
+                data["players"][occ_uid]["war_declared"] = [x for x in occ_p.get("war_declared",[]) if norm(x) != norm(orig)]
+                # إزالة من protects
+                data["players"][occ_uid]["protects"] = [x for x in occ_p.get("protects",[]) if norm(x) != norm(orig)]
             save_data(data)
             await update.message.reply_text(
                 f"{box_title('🎉','الثورة نجحت!')}\n"
@@ -5761,7 +5766,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             army_lost = max(20, int(my_army * random.uniform(0.35, 0.55)))
             fine = 10000
             data["players"][str(uid)]["army"] = max(0, my_army - army_lost)
-            data["players"][occ_uid]["gold"]  = occ_p.get("gold",0) + fine
+            if occ_uid:
+                data["players"][occ_uid]["gold"] = occ_p.get("gold",0) + fine
             save_data(data)
             await update.message.reply_text(
                 f"💔 *الثورة فشلت!*\n{sep()}\n"
@@ -5771,10 +5777,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏳ أعد بناء جيشك وحاول مجدداً",
                 parse_mode="Markdown")
             try:
-                await context.bot.send_message(chat_id=int(occ_uid),
-                    text=f"🛡️ *قمعت الثورة!*\n{sep()}\n"
-                         f"أخمدت ثورة *{p['country_name']}*\n"
-                         f"💰 غنمت *{CUR}{fine:,}* غرامة", parse_mode="Markdown")
+                if occ_uid:
+                    await context.bot.send_message(chat_id=int(occ_uid),
+                        text=f"🛡️ *قمعت الثورة!*\n{sep()}\n"
+                             f"أخمدت ثورة *{p['country_name']}*\n"
+                             f"💰 غنمت *{CUR}{fine:,}* غرامة", parse_mode="Markdown")
             except: pass
         return
 
@@ -5812,19 +5819,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_chance = min(0.70, ratio * 0.85)
         data["players"][str(uid)]["gold"] -= cost
         success = random.random() < success_chance
+        orig = p["country_name"].replace(" (مستعمرة)","")
         if success:
-            orig = p["country_name"].replace(" (مستعمرة)","")
-            army_lost  = max(50, int(my_army * random.uniform(0.15, 0.30)))
-            master_lost= max(200, int(master_army * random.uniform(0.20, 0.35)))
-            data["players"][str(uid)]["colony_of"]     = None
-            data["players"][str(uid)]["country_name"]  = orig
-            data["players"][str(uid)]["army"]          = max(1, my_army - army_lost)
-            data["players"][str(uid)]["wars_won"]      = p.get("wars_won",0) + 1
+            army_lost   = max(50, int(my_army * random.uniform(0.15, 0.30)))
+            master_lost = max(200, int(master_army * random.uniform(0.20, 0.35)))
+            data["players"][str(uid)]["colony_of"]      = None
+            data["players"][str(uid)]["country_name"]   = orig
+            data["players"][str(uid)]["army"]           = max(1, my_army - army_lost)
+            data["players"][str(uid)]["wars_won"]       = p.get("wars_won",0) + 1
             data["players"][str(uid)]["happiness_bonus"] = min(30, p.get("happiness_bonus",0) + 15)
+            # تنظيف at_war و war_declared للطرفين
+            data["players"][str(uid)]["at_war"] = [x for x in p.get("at_war",[]) if norm(x) != norm(master_name)]
+            data["players"][str(uid)]["war_declared"] = [x for x in p.get("war_declared",[]) if norm(x) != norm(master_name)]
             if master_uid:
-                data["players"][master_uid]["army"]      = max(0, master_army - master_lost)
-                data["players"][master_uid]["wars_lost"] = master_p.get("wars_lost",0) + 1
-                # أزل من قائمة المستعمرات إن وجدت
+                data["players"][master_uid]["army"]       = max(0, master_army - master_lost)
+                data["players"][master_uid]["wars_lost"]  = master_p.get("wars_lost",0) + 1
+                data["players"][master_uid]["at_war"]     = [x for x in master_p.get("at_war",[]) if norm(x) != norm(orig)]
+                data["players"][master_uid]["war_declared"] = [x for x in master_p.get("war_declared",[]) if norm(x) != norm(orig)]
+                # إزالة من protects
+                data["players"][master_uid]["protects"]   = [x for x in master_p.get("protects",[]) if norm(x) != norm(orig)]
             save_data(data)
             await update.message.reply_text(
                 f"{box_title('🏳️','إعلان الاستقلال!')}\n"
@@ -5834,16 +5847,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"😊 الشعب يحتفل بالاستقلال! +15%",
                 parse_mode="Markdown")
             try:
-                await context.bot.send_message(chat_id=int(master_uid),
-                    text=f"🏳️ *استقلال المستعمرة!*\n{sep()}\n"
-                         f"*{orig}* أعلنت استقلالها بالقوة!\n"
-                         f"💀 خسرت *{master_lost:,}* جندي", parse_mode="Markdown")
+                if master_uid:
+                    await context.bot.send_message(chat_id=int(master_uid),
+                        text=f"🏳️ *استقلال المستعمرة!*\n{sep()}\n"
+                             f"*{orig}* أعلنت استقلالها بالقوة!\n"
+                             f"💀 خسرت *{master_lost:,}* جندي", parse_mode="Markdown")
             except: pass
         else:
             army_lost = max(30, int(my_army * random.uniform(0.25, 0.40)))
             fine = 20000
             data["players"][str(uid)]["army"] = max(0, my_army - army_lost)
-            data["players"][master_uid]["gold"] = master_p.get("gold",0) + fine
+            if master_uid:
+                data["players"][master_uid]["gold"] = master_p.get("gold",0) + fine
             save_data(data)
             await update.message.reply_text(
                 f"💔 *فشل إعلان الاستقلال!*\n{sep()}\n"
@@ -5853,10 +5868,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏳ جند أكثر وحاول مجدداً",
                 parse_mode="Markdown")
             try:
-                await context.bot.send_message(chat_id=int(master_uid),
-                    text=f"🛡️ *أخمدت محاولة الاستقلال!*\n{sep()}\n"
-                         f"*{p['country_name']}* فشلت في الاستقلال\n"
-                         f"💰 غنمت *{CUR}{fine:,}* غرامة", parse_mode="Markdown")
+                if master_uid:
+                    await context.bot.send_message(chat_id=int(master_uid),
+                        text=f"🛡️ *أخمدت محاولة الاستقلال!*\n{sep()}\n"
+                             f"*{p['country_name']}* فشلت في الاستقلال\n"
+                             f"💰 غنمت *{CUR}{fine:,}* غرامة", parse_mode="Markdown")
             except: pass
         return
 
@@ -7194,186 +7210,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💡 اكتب `مساعدة` لقائمة الأوامر الكاملة",
             parse_mode="Markdown")
         return
-        await update.message.reply_text(
-            f"{box_title('🌍','Clash of Civilizations — دليل اللاعب')}\n\n"
-            f"*صراع الحضارات* هي لعبة جيوسياسية استراتيجية تدور في "
-            f"منطقة واسعة تمتد من القوقاز إلى أفريقيا. تبني دولتك من الصفر وتطورها عبر الاقتصاد "
-            f"والجيش والدبلوماسية.\n",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('🎮','كيف تبدأ؟')}\n\n"
-            f"1️⃣ اكتب `انضم` — ستظهر أزرار الدول المتاحة\n"
-            f"2️⃣ اختار دولتك من القائمة\n"
-            f"3️⃣ اكتب اسم دولتك\n"
-            f"4️⃣ ارفق صورة علمك\n"
-            f"5️⃣ ابدأ باللعب! 🎮\n\n"
-            f"*المناطق المتاحة:*\n"
-            f"السعودية | الكويت | العراق | إيران | قطر\n"
-            f"الإمارات | عمان | اليمن | مصر\n"
-            f"سوريا | لبنان | الأردن | فلسطين | تركيا | قبرص",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('💰','الاقتصاد')}\n\n"
-            f"*الضرائب:* كل 10 دقايق اكتب `جمع الضرائب`\n"
-            f"الدخل = عدد الأراضي × بونص البنية التحتية\n\n"
-            f"*المزارع:* `بناء مزرعة` — تنتج محاصيل تُباع تلقائياً\n"
-            f"كل منطقة لها محاصيل خاصة (قمح، نفط، مثاقيل...)\n\n"
-            f"*المنشآت:* `بناء منشاة` — تزيد الدخل والمزايا\n"
-            f"مستشفى | مطار | ميناء | بنك | مصنع | محطة تحلية...\n\n"
-            f"*البنية التحتية:* `بناء بنية تحتية`\n"
-            f"تزيد سقف المزارع والمنشآت وتزيد دخل الضرائب\n\n"
-            f"*القروض:* `البنك الدولي` — 3 أحجام بفوائد مختلفة\n"
-            f"*التحويل:* `تحويل [مبلغ] [كود]` — أرسل مثاقيل لدولة أخرى",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('⚔️','الجيش والحرب')}\n\n"
-            f"*التجنيد:* `تجنيد [عدد]` — كل جندي بـ 10¥\n\n"
-            f"*الهجوم:* `هجوم على [اسم الدولة]`\n"
-            f"• لازم تكون على حدود الهدف أو ساحلياً\n"
-            f"• الانتصار = غنيمة مثاقيل + أرض جديدة\n"
-            f"• لو جيش العدو وصل 0 → *غزو كامل*\n\n"
-            f"*إعلان الحرب:* `اعلن حرب علي [دولة]` — Lv.3+ (إجباري)\n"
-            f"يعطيك +15% قوة هجوم\n\n"
-            f"*الأسلحة:* `شراء اسلحة`\n"
-            f"سيف → بندقية → مدفع → صاروخ → قنبلة ذرية ☢️\n"
-            f"كل سلاح يزيد قوة هجومك في المعارك\n\n"
-            f"*cooldown الهجوم:* 5 دقايق (يقل بالمطارات)",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('🏴','الغزو والاستعمار')}\n\n"
-            f"*الاحتلال:* لما تصفّر جيش دولة → تصير _(محتلة)_\n"
-            f"• تجمع ضرائبها تلقائياً\n"
-            f"• المحتَلة تقدر تعمل `ثورة` للتحرر\n\n"
-            f"*الاستعمار:* `استعمر [دولة]` — بعد الاحتلال\n"
-            f"• تقدر تحصد مواردها: `احصد مستعمرة [اسم]`\n"
-            f"• تقدر تهديها: `اهدي مستعمرة [اسم] الى [كود]`\n"
-            f"• المستعمَرة تقدر `استقلال` بتكلفة كبيرة\n\n"
-            f"*التحرر:*\n"
-            f"🗡️ `ثورة` — تكلف 30% من جيش المحتل + 15,000¥\n"
-            f"✊ `استقلال` — تكلف 60% من جيش المستعمِر + 25,000¥",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('🤝','الدبلوماسية والأحلاف')}\n\n"
-            f"*الأحلاف:* `انشاء حلف [اسم]` ثم `دعوة [حلف] [دولة]`\n"
-            f"• أعضاء الحلف يتوسعون معاً\n"
-            f"• لا يهاجمون بعض\n"
-            f"• مضائقهم لا تؤثر عليهم\n\n"
-            f"*الهجوم الجماعي:* `هجوم جماعي [حلف] على [دولة]`\n"
-            f"• للمؤسس فقط\n"
-            f"• كل الأعضاء يشاركون بـ 70-95% من جيشهم\n"
-            f"• بونص +20% تنسيق جماعي\n"
-            f"• الغنيمة توزع بالتساوي\n"
-            f"• الغزو يروح للمؤسس\n\n"
-            f"*الحلف = دفاع + هجوم مشترك تلقائي* 🤝\n"
-            f"• يتطلب حلف مشترك\n"
-            f"• لو هوجمت، جيش حليفك يدافع تلقائياً\n\n"
-            f"*معاهدة السلام:* `معاهدة سلام مع [دولة]` — 5,000¥\n"
-            f"• 24 ساعة لا هجوم",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('⚓','المضائق الاستراتيجية')}\n\n"
-            f"4 مضائق تتحكم في التجارة والضرائب:\n\n"
-            f"🌊 *هرمز* — عمان/إيران\n"
-            f"   يؤثر على: السعودية، الكويت، العراق، قطر، الإمارات\n\n"
-            f"🌊 *باب المندب* — اليمن\n"
-            f"   يؤثر على: مصر، الأردن\n\n"
-            f"🌊 *السويس* — مصر\n"
-            f"   يؤثر على: الأردن، فلسطين، لبنان، سوريا، تركيا، قبرص\n\n"
-            f"🌊 *البسفور* — تركيا\n"
-            f"   يؤثر على: سوريا، لبنان، قبرص، مصر\n\n"
-            f"لما مضيق مغلق → الدول المتأثرة تنتظر 15 دقيقة بدل 10\n"
-            f"أعضاء حلف المُغلِق لا يتأثرون ✅\n\n"
-            f"`اغلق مضيق [اسم]` | `افتح مضيق [اسم]`",
-            parse_mode="Markdown")
-        await update.message.reply_text(
-            f"{box_title('📈','المستويات والتطور')}\n\n"
-            f"🏚️ Lv.1  — *قرية* (0 XP)\n"
-            f"🏘️ Lv.2  — *بلدة* (300 XP) — تجنيد مخفض\n"
-            f"🏙️ Lv.3  — *مدينة* (800 XP) — وزير دفاع\n"
-            f"🏰 Lv.4  — *إمارة* (2,000 XP) — دبلوماسية، إعلان حرب\n"
-            f"⚜️ Lv.5  — *سلطنة* (4,000 XP) — تجسس\n"
-            f"👑 Lv.6  — *مملكة* (7,500 XP) — هيمنة اقتصادية\n"
-            f"🗺️ Lv.7  — *دولة كبرى* (13,000 XP) — حماية الدول\n"
-            f"🌟 Lv.8  — *إمبراطورية* (22,000 XP) — درع إمبراطوري\n"
-            f"⚡ Lv.9  — *قوة عظمى* (35,000 XP) — ضربة خاطفة\n"
-            f"🚀 Lv.10 — *حضارة متقدمة* (55,000 XP) — هيمنة نووية\n"
-            f"🔱 Lv.11 — *أسطورة* (80,000 XP) — خزينة لا تنضب\n"
-            f"☪️ Lv.12 — *خلافة* (120,000 XP) — لا عقوبة خمول\n\n"
-            f"تكسب XP من: الهجوم ✅ | جمع الضرائب ✅ | الاستعمار ✅\n\n"
-            f"{box_title('⚠️','أحداث تلقائية')}\n\n"
-            f"🌪️ *كوارث طبيعية* — تضرب الدول عشوائياً\n"
-            f"🗳️ *أحداث سياسية* — تحدث لو رضا الشعب منخفض\n"
-            f"📰 *النشرة الإخبارية* — كل 20 دقيقة أخبار اللعبة\n"
-            f"😴 *عقوبة الخمول* — لو ما لعبت 7 أيام تخسر موارد\n\n"
-            f"{sep()}\n"
-            f"💡 اكتب `مساعدة` لقائمة الأوامر الكاملة",
-            parse_mode="Markdown")
-        return
 
     # ======= مساعدة =======
     if ntext in ["مساعده","اوامر","help"]:
         wars_status = "⚔️ الحروب مفتوحة" if data.get("wars_enabled", True) else "🕊️ الحروب موقوفة"
         await update.message.reply_text(
-            f"{box_title('📖','دليل اللعبة')}\n\n"
+            f"{box_title('📖','دليل اللعبة — صراع الحضارات')}\n\n"
             f"━━ 🎮 *البداية* ━━\n"
             f"`انضم` — انضم للعبة واختار دولتك\n"
-            f"`كودي` — عرض كودك\n\n"
+            f"`كودي` — عرض كودك\n"
+            f"`تعيين العلم` ← ارفق صورة علمك\n"
+            f"`تغيير اسم دولتي [الاسم]` — تغيير اسم الدولة\n\n"
             f"━━ 📊 *المعلومات* ━━\n"
-            f"`حالة دولتي` — الاقتصاد والجيش\n"
-            f"`دولتي` — السكان والأحوال\n"
-            f"`دولي` — الإمبراطورية كاملة\n"
-            f"`قائمة الدول` | `خريطة` | `المتصدرين` | `المضائق`\n"
-            f"`إحصائيات اللعبة` — أرقام وسجلات اللعبة\n\n"
+            f"`حالة دولتي` | `دولتي` | `دولي`\n"
+            f"`قائمة الدول` | `خريطة` | `المتصدرين`\n"
+            f"`المضائق` | `إحصائيات اللعبة`\n\n"
             f"━━ 💰 *الاقتصاد* ━━\n"
-            f"`جمع الضرائب` — كل 10 دقايق\n"
+            f"`جمع الضرائب` — كل 10 دقائق\n"
             f"`بناء مزرعة` | `بناء منشاة` | `بناء بنية تحتية`\n"
             f"`العاصمة [اسم]` | `تحويل [مبلغ] [كود]`\n"
-            f"`البنك الدولي` | `ديوني` | `مهرجان شعبي`\n"
-            f"`تعديل علمي` ← ارفق صورة\n\n"
+            f"`البنك الدولي` | `ديوني` | `مهرجان شعبي`\n\n"
             f"━━ ⚔️ *الجيش والحرب* ━━\n"
             f"`تجنيد [عدد]` | `جيشي`\n"
-            f"`هجوم على [دولة]`\n"
-            f"`اعلن حرب علي [دولة]` — Lv.3+ (إجباري قبل الهجوم)\n"
-            f"`اضرب قنبلة_ذرية على [دولة]` — ☢️\n\n"
-            f"━━ 🔫 *الأسلحة* ━━\n"
-            f"`شراء اسلحة` | `شراء [سلاح] [عدد]`\n\n"
+            f"`اعلن حرب علي [دولة]` — Lv.3+ (إجباري)\n"
+            f"`هجوم علي [دولة]`\n"
+            f"`اضرب قنبلة_ذرية [دولة]` — ☢️\n\n"
+            f"━━ 🔫 *الأسلحة والأسطول* ━━\n"
+            f"`شراء اسلحة` | `شراء [سلاح] [عدد]`\n"
+            f"`بناء اسطول` | `سفينة [نوع] [عدد]`\n\n"
             f"━━ 🏴 *الغزو والاستعمار* ━━\n"
-            f"`غزو [منطقة]` — احتل منطقة غير مأهولة\n"
-            f"`دمج [منطقة]` — ادمجها في دولتك (بعد ساعة)\n"
-            f"`فصل [منطقة]` — افصلها مجدداً\n"
-            f"`استعمر [اسم]` — حوّل محتلة → مستعمرة\n"
-            f"`احصد مستعمرة [اسم]` | `تحرير [اسم]`\n"
-            f"`اهدي مستعمرة [اسم] الى [كود]`\n"
+            f"`غزو [منطقة]` | `دمج [منطقة]` | `فصل [منطقة]`\n"
+            f"`استعمر [اسم]` | `احصد مستعمرة [اسم]`\n"
+            f"`تحرير [اسم]` | `اهدي مستعمرة [اسم] الى [كود]`\n"
             f"`ثورة` — تحرر من احتلال\n"
             f"`استقلال` — تحرر من استعمار\n\n"
-            f"━━ 🤝 *الدبلوماسية* ━━\n"
-            f"`معاهدة سلام مع [دولة]` — Lv.4+ (5000¥)\n"
-            f"`إلغاء تحالف دفاعي مع [دولة]`\n"
-            f"`احمي [دولة]`\n\n"
+            f"━━ 🤝 *الدبلوماسية والحماية* ━━\n"
+            f"`معاهدة سلام مع [دولة]` — Lv.4+\n"
+            f"`احمي [دولة]` — Lv.7+\n"
+            f"`قبول الحماية` | `رفض الحماية` | `الغاء الحماية`\n\n"
             f"━━ 🕵️ *المخابرات والتحصين* ━━\n"
-            f"`تجسس على [دولة]` — Lv.5+ (5000¥) تقرير تفصيلي\n"
-            f"`تحصين` — بناء تحصين (+15% دفاع، حد 3)\n\n"
+            f"`تجسس علي [دولة]` — Lv.5+\n"
+            f"`تحصين` — +15% دفاع (حد 3)\n\n"
             f"━━ 🏛️ *مجلس الوزراء* ━━\n"
-            f"`مجلس الوزراء` — عرض الوزراء الحاليين\n"
-            f"`تعيين [منصب] [اسم]` — تعيين وزير (2000¥)\n"
-            f"`اقالة [منصب]` — إقالة وزير\n\n"
-            f"━━ 📊 *الاقتصاد العالمي* ━━\n"
-            f"`بورصة` — أسعار الموارد العالمية\n"
-            f"`بيع موارد [نوع] [كمية]` | `شراء موارد [نوع] [كمية]`\n"
-            f"`الحدث العالمي` — الحدث النشط وتأثيراته\n"
-            f"`سجل الأحداث` — آخر 15 حدث في اللعبة\n\n"
+            f"`مجلس الوزراء` | `تعيين [منصب] [اسم]` | `اقالة [منصب]`\n\n"
+            f"━━ 📈 *الاقتصاد العالمي* ━━\n"
+            f"`بورصة` | `بيع موارد [نوع] [كمية]`\n"
+            f"`الحدث العالمي` | `سجل الأحداث`\n\n"
             f"━━ ⚓ *المضائق* ━━\n"
             f"`اغلق مضيق [اسم]` | `افتح مضيق [اسم]`\n"
-            f"هرمز | باب المندب | السويس | البسفور\n\n"
+            f"هرمز | باب المندب | السويس | البسفور | جبل طارق\n\n"
             f"━━ 🏛️ *الأحلاف* ━━\n"
-            f"`انشاء حلف [اسم]` | `دعوة [حلف] [دولة]`\n"
-            f"`قائمة الاحلاف` | `حلف [اسم]`\n"
-            f"`جيش الحلف [اسم]` — قوة الحلف الكاملة\n"
-            f"`هجوم جماعي [حلف] على [دولة]` — للمؤسس فقط\n"
-            f"`مغادرة حلف [اسم]` | `طرد من حلف [حلف] [دولة]`\n"
+            f"`انشاء حلف [اسم]` | `دعوه [حلف] [دولة]`\n"
+            f"`قائمة الاحلاف` | `حلف [اسم]` | `جيش الحلف [اسم]`\n"
+            f"`هجوم جماعي [حلف] علي [دولة]` — للمؤسس\n"
+            f"`مغادره حلف [اسم]` | `طرد من حلف [حلف] [دولة]`\n"
             f"`حل حلف [اسم]`\n\n"
             f"{sep()}\n"
-            f"{wars_status}",
+            f"{wars_status}\n"
+            f"💡 `cocg` — شرح مفصل عن اللعبة",
             parse_mode="Markdown")
         return
 

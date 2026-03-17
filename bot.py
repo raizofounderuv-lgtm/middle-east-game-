@@ -1524,6 +1524,9 @@ def get_tax_cooldown(d, region):
     straits = get_strait_status(d)
     # اجيب اللاعب صاحب المنطقة
     player = next((pp for pp in d.get("players",{}).values() if pp.get("region") == region), None)
+    # فحص عقوبة الحصاد
+    if player and player.get("tax_penalty_until", 0) > time.time():
+        return 60 * 20  # 20 دقيقة عقوبة
     for s in straits.values():
         if not s.get("blocked"): continue
         if region not in s.get("affects", []): continue
@@ -1609,7 +1612,7 @@ def generate_map(players, d):
         region    = p.get("region")
         if region not in REGION_COORDS: continue
         lvl   = get_level(p.get("xp", 0))
-        tag   = " 🗡️" if p.get("traitor") else ""
+        tag   = f" 🗡️{p.get('traitor_label','خائن')}" if p.get("traitor") else ""
         label = f"{lvl['emoji']}{p.get('country_name','')}{tag}"
 
         # لو محتلة أو مستعمرة — استخدم علم المحتل/المستعمِر
@@ -3390,7 +3393,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "مساعده","اوامر","help","cocg","المضائق","جيشي","قواتي","تسليحي","عتادي",
         "تعديل","غير","تحديث","علم","تعيين","اغلق","افتح","مضيق","نشره","نشرة","تغيير",
         "تفعيل","الغاء","احصائيات","إحصائيات","الاحلاف","قائمة","ادمن","admin",
-        "حذف","تجميد","رفع","منح","اعاده","اعادة","اضف","توبيك","ايقاف","فك","تحكم","control",
+        "حذف","تجميد","رفع","بان","وصمة","خائن","منح","رفع وصمة","رفع وصمه","عقوبة","عقوبه","لاعبين","اللاعبين","نشر","توبيك الاعلانات","توبيك الإعلانات","اعاده","اعادة","اضف","توبيك","ايقاف","فك","تحكم","control",
         "حفظ","استعادة","restore","backup",
         "تحرير","استقلال","ثورة","حمايه","حماية","مستعمره","مستعمرة","تحالف",
     }
@@ -3402,7 +3405,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if first_word not in KNOWN_PREFIXES and ntext not in KNOWN_PREFIXES:
             return  # رسالة عادية — تجاهل بصمت
 
-    # ======= فحص التجميد — الأدمن مستثنى =======
+    # ======= فحص التجميد والبان المؤقت — الأدمن مستثنى =======
     if not is_admin(uid):
         player_data = data.get("players", {}).get(str(uid), {})
         if player_data.get("frozen"):
@@ -3411,6 +3414,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "لا يمكنك استخدام أي أوامر حالياً.\n"
                 "تواصل مع الأدمن للاستفسار.", parse_mode="Markdown")
             return
+        # فحص البان المؤقت
+        ban_until = player_data.get("ban_until", 0)
+        # فحص قاموس banned_users كمان (للمحظورين بدون دولة)
+        if not ban_until:
+            ban_until = data.get("banned_users", {}).get(str(uid), 0)
+        if ban_until and time.time() < ban_until:
+            rem = int(ban_until - time.time())
+            h, m = rem // 3600, (rem % 3600) // 60
+            await update.message.reply_text(
+                f"⛔ *أنت محظور مؤقتاً*\n{sep()}\n"
+                f"ينتهي الحظر بعد: *{h}س {m}د*\n"
+                f"تواصل مع الأدمن للاستفسار.", parse_mode="Markdown")
+            return
+        elif ban_until and time.time() >= ban_until:
+            # انتهى الحظر — ارفعه تلقائياً
+            data["players"][str(uid)]["ban_until"] = 0
+            save_data(data)
 
     # ======= فحص عضوية الجروب =======
     if not is_admin(uid):
@@ -3822,7 +3842,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crops_p = tp.get("crops", {})
         infra   = tp.get("infrastructure", 0)
         capital = tp.get("capital", "غير محددة")
-        traitor = " 🗡️خائن" if tp.get("traitor") else ""
+        traitor = f" 🗡️{tp.get('traitor_label','خائن')}" if tp.get("traitor") else ""
         # أعضاء الأحلاف المشتركة بدل allies
         orgs_tmp = data.get("organizations", {})
         allies_list = list({m for ov in orgs_tmp.values() if tp["country_name"] in ov["members"] for m in ov["members"] if m != tp["country_name"]})
@@ -3917,7 +3937,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res     = REGION_RESOURCES.get(p["region"],[])
         capital = p.get("capital","غير محددة")
         infra   = p.get("infrastructure",0)
-        traitor = " 🗡️خائن" if p.get("traitor") else ""
+        traitor = f" 🗡️{p.get('traitor_label','خائن')}" if p.get("traitor") else ""
         xp_bar  = progress_bar(xp - lvl["xp"], (nxt["xp"] - lvl["xp"]) if nxt else (xp - lvl["xp"] or 1))
 
         # حساب الاقتصاد — يعكس الحصاد الفعلي بدقة
@@ -7259,7 +7279,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             m    = medals[i] if i<3 else f"  {i+1}."
             lvl  = get_level(pp.get("xp",0))
             bar_xp = progress_bar(pp.get("xp",0), 25000, 8)
-            tag  = " 🗡️" if pp.get("traitor") else ""
+            tag  = f" 🗡️{pp.get('traitor_label','خائن')}" if pp.get("traitor") else ""
             occ  = " 🏴" if pp.get("occupied_by") else ""
             army = pp.get("army",0)
             gold = pp.get("gold",0)
@@ -7280,7 +7300,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = header
         for i,(puid,pp) in enumerate(sorted_countries, 1):
             lvl  = get_level(pp.get("xp",0))
-            tag  = " 🗡️" if pp.get("traitor") else ""
+            tag  = f" 🗡️{pp.get('traitor_label','خائن')}" if pp.get("traitor") else ""
             occ  = " _(محتلة)_" if pp.get("occupied_by") else ""
             col  = " _(مستعمرة)_" if pp.get("colony_of") else ""
             cname = pp['country_name'].replace("*","★").replace("_","‐").replace("`","")
@@ -8475,7 +8495,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• `منح جيش [دولة] [عدد]` — منح/خصم جنود\n"
                 f"• `منح xp [دولة] [عدد]` — منح XP\n"
                 f"• `فك احتلال [دولة]` — تحرير قسري من احتلال\n"
-                f"• `تجميد [دولة]` — تجميد/رفع تجميد\n\n"
+                f"• `تجميد [دولة]` — تجميد/رفع تجميد\n"
+                f"• `بان [دولة] [ساعات]` — حظر مؤقت\n"
+                f"• `رفع بان [دولة]` — رفع الحظر المؤقت\n"
+                f"• `وصمة [telegram_id] [الوصمة]` — وصمة مخصصة 🗡️\n"
+                f"• `رفع وصمة [telegram_id]` — رفع الوصمة\n"
+                f"• `عقوبة [telegram_id] [ساعات]` — حصاد 20د\n"
+                f"• `رفع عقوبة [telegram_id]` — رفع العقوبة\n\n"
                 f"*بيانات وإحصائيات:*\n"
                 f"• `احصائيات الان` — نظرة عامة على اللعبة\n"
                 f"• `سجل [دولة]` — بيانات كاملة للدولة\n"
@@ -8488,7 +8514,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• `تفعيل البوت` — (في الجروب) تفعيل البوت فيه\n"
                 f"• `إلغاء تفعيل [group_id]` — إلغاء جروب معين\n"
                 f"• `الجروبات` — عرض كل الجروبات المفعّلة\n"
-                f"• `تفعيل النشرة` / `إيقاف النشرة`\n"
+                f"• `نشر [العنوان] | [النص]` — إعلان منسق في التوبيك\n"
+                f"• `توبيك الاعلانات [id]` — تحديد توبيك الإعلانات\n"
                 f"• `توبيك النشرة [id]` — تحديد التوبيك\n"
                 f"• `نشرة` — اختبار النشرة فوراً\n"
                 f"• `تسريع الكوارث` — تشغيل كارثة فوراً\n"
@@ -8688,6 +8715,221 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except: pass
             return
 
+        # ======= إعلان رسمي =======
+        if ntext.startswith("نشر "):
+            raw = text.strip()
+            raw = raw[raw.index("نشر ")+4:].strip()
+            if not raw:
+                await update.message.reply_text(
+                    "❌ الصيغة: `نشر [العنوان] | [النص]`",
+                    parse_mode="Markdown"); return
+            data.setdefault("pending_announcement", {})[str(uid)] = raw
+            save_data(data)
+            kbd = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📌 التوبيك المحدد", callback_data="announce_topic")],
+                [InlineKeyboardButton("💬 كل الجروبات", callback_data="announce_groups")],
+                [InlineKeyboardButton("📌 + 💬 الاثنين", callback_data="announce_both")],
+                [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")],
+            ])
+            sent = await update.message.reply_text(
+                "📢 *وين تنشر الإعلان؟*",
+                reply_markup=kbd, parse_mode="Markdown")
+            register_msg(sent, uid)
+            return
+
+
+        # ======= تحديد توبيك الإعلانات =======
+        if ntext.startswith("توبيك الاعلانات ") or ntext.startswith("توبيك الإعلانات "):
+            parts = ntext.split()
+            if len(parts) < 2 or not parts[-1].lstrip("-").isdigit():
+                await update.message.reply_text("❌ الصيغة: `توبيك الاعلانات [id]`", parse_mode="Markdown"); return
+            topic_id = int(parts[-1])
+            data["announcement_topic_id"] = topic_id
+            save_data(data)
+            await update.message.reply_text(
+                f"📌 *تم تحديد توبيك الإعلانات!*\nID: `{topic_id}`",
+                parse_mode="Markdown")
+            return
+
+        # ======= قائمة اللاعبين =======
+        if ntext in ["اللاعبين", "قائمة اللاعبين", "لاعبين"]:
+            players = data.get("players", {})
+            if not players:
+                await update.message.reply_text("❌ لا يوجد لاعبين."); return
+            lines = []
+            for puid, pp in sorted(players.items(), key=lambda x: x[1].get("xp",0), reverse=True):
+                name = pp.get("country_name", "—")
+                region = pp.get("region", "—")
+                traitor = f" 🗡️{pp.get('traitor_label','خائن')}" if pp.get("traitor") else ""
+                frozen = " 🧊" if pp.get("frozen") else ""
+                ban_until = pp.get("ban_until", 0)
+                banned = " ⛔" if ban_until and time.time() < ban_until else ""
+                penalty = " ⏳" if pp.get("tax_penalty_until",0) > time.time() else ""
+                lines.append(f"🆔 `{puid}`{traitor}{frozen}{banned}{penalty}\n   └ *{name}* — {region}")
+            # إرسال مقسم
+            header = f"{box_title('👥','اللاعبين')} ({len(players)})\n\n"
+            current = header
+            for line in lines:
+                entry = line + "\n\n"
+                if len(current) + len(entry) > 3800:
+                    await update.message.reply_text(current, parse_mode="Markdown")
+                    current = entry
+                else:
+                    current += entry
+            if current.strip() and current != header:
+                await update.message.reply_text(current, parse_mode="Markdown")
+            return
+        if ntext.startswith("بان "):
+            # الصيغة: بان [telegram_id] [ساعات]
+            parts = ntext.replace("بان","").strip().split()
+            if len(parts) < 2:
+                await update.message.reply_text("❌ الصيغة: `بان [telegram_id] [ساعات]`\nمثال: `بان 123456789 24`", parse_mode="Markdown"); return
+            try: target_id = int(parts[0]); hours = max(1, int(parts[1]))
+            except: await update.message.reply_text("❌ الصيغة: `بان [telegram_id] [ساعات]`", parse_mode="Markdown"); return
+            ban_until = time.time() + hours * 3600
+            # سجله سواء عنده دولة أو لأ
+            data.setdefault("banned_users", {})[str(target_id)] = ban_until
+            # لو عنده دولة حدّثها كمان
+            if str(target_id) in data.get("players", {}):
+                data["players"][str(target_id)]["ban_until"] = ban_until
+                name = data["players"][str(target_id)].get("country_name", str(target_id))
+            else:
+                name = str(target_id)
+            save_data(data)
+            await update.message.reply_text(
+                f"⛔ *تم حظر {name} مؤقتاً*\n{sep()}\n"
+                f"المدة: *{hours} ساعة*\n"
+                f"ينتهي: {time.strftime('%Y-%m-%d %H:%M', time.localtime(ban_until))}\n"
+                f"لرفع الحظر: `رفع بان {target_id}`", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=target_id,
+                    text=f"⛔ *تم حظرك مؤقتاً من اللعب*\n{sep()}\n"
+                         f"المدة: *{hours} ساعة*\n"
+                         f"تواصل مع الأدمن للاستفسار.", parse_mode="Markdown")
+            except: pass
+            return
+
+        # ======= رفع بان مؤقت =======
+        if ntext.startswith("رفع بان "):
+            parts = ntext.replace("رفع بان","").strip().split()
+            if not parts:
+                await update.message.reply_text("❌ الصيغة: `رفع بان [telegram_id]`", parse_mode="Markdown"); return
+            try: target_id = int(parts[0])
+            except: await update.message.reply_text("❌ لازم رقم telegram_id"); return
+            data.setdefault("banned_users", {}).pop(str(target_id), None)
+            if str(target_id) in data.get("players", {}):
+                data["players"][str(target_id)]["ban_until"] = 0
+                name = data["players"][str(target_id)].get("country_name", str(target_id))
+            else:
+                name = str(target_id)
+            save_data(data)
+            await update.message.reply_text(f"✅ *رُفع الحظر عن {name}*", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=target_id,
+                    text=f"✅ *رُفع الحظر عنك*\nيمكنك اللعب مجدداً!", parse_mode="Markdown")
+            except: pass
+            return
+
+        # ======= عقوبة حصاد =======
+        if ntext.startswith("عقوبة ") or ntext.startswith("عقوبه "):
+            # الصيغة: عقوبة حصاد [telegram_id] [ساعات]
+            parts = ntext.replace("عقوبة","").replace("عقوبه","").strip().split()
+            if len(parts) < 2:
+                await update.message.reply_text("❌ الصيغة: `عقوبة حصاد [telegram_id] [ساعات]`\nمثال: `عقوبة حصاد 123456789 24`", parse_mode="Markdown"); return
+            try: target_id = int(parts[0]); hours = max(1, int(parts[1]))
+            except: await update.message.reply_text("❌ الصيغة: `عقوبة [telegram_id] [ساعات]`"); return
+            if str(target_id) not in data.get("players", {}):
+                await update.message.reply_text(f"❌ اللاعب {target_id} مش عنده دولة."); return
+            penalty_until = time.time() + hours * 3600
+            data["players"][str(target_id)]["tax_penalty_until"] = penalty_until
+            save_data(data)
+            name = data["players"][str(target_id)].get("country_name", str(target_id))
+            await update.message.reply_text(
+                f"⏳ *عقوبة حصاد على {name}*\n{sep()}\n"
+                f"الحصاد أصبح كل *20 دقيقة* لمدة *{hours} ساعة*\n"
+                f"تنتهي: {time.strftime('%Y-%m-%d %H:%M', time.localtime(penalty_until))}",
+                parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=target_id,
+                    text=f"⏳ *عقوبة إدارية*\n{sep()}\n"
+                         f"تم تغيير cooldown الحصاد لديك إلى *20 دقيقة* لمدة *{hours} ساعة*.",
+                    parse_mode="Markdown")
+            except: pass
+            return
+
+        # ======= رفع عقوبة حصاد =======
+        if ntext.startswith("رفع عقوبة ") or ntext.startswith("رفع عقوبه "):
+            parts = ntext.replace("رفع عقوبة","").replace("رفع عقوبه","").strip().split()
+            if not parts:
+                await update.message.reply_text("❌ الصيغة: `رفع عقوبة [telegram_id]`"); return
+            try: target_id = int(parts[0])
+            except: await update.message.reply_text("❌ لازم رقم telegram_id"); return
+            if str(target_id) not in data.get("players", {}):
+                await update.message.reply_text(f"❌ اللاعب {target_id} مش عنده دولة."); return
+            data["players"][str(target_id)]["tax_penalty_until"] = 0
+            save_data(data)
+            name = data["players"][str(target_id)].get("country_name", str(target_id))
+            await update.message.reply_text(f"✅ *رُفعت عقوبة الحصاد عن {name}*", parse_mode="Markdown")
+            return
+
+        # ======= رفع وصمة =======
+        if ntext.startswith("رفع وصمة ") or ntext.startswith("رفع وصمه "):
+            parts = ntext.replace("رفع وصمة","").replace("رفع وصمه","").strip().split()
+            if not parts:
+                await update.message.reply_text("❌ الصيغة: `رفع وصمة [telegram_id]`", parse_mode="Markdown"); return
+            try: target_id = int(parts[0])
+            except: await update.message.reply_text("❌ لازم رقم telegram_id"); return
+            if str(target_id) not in data.get("players", {}):
+                await update.message.reply_text(f"❌ اللاعب {target_id} مش عنده دولة."); return
+            tp = data["players"][str(target_id)]
+            if not tp.get("traitor"):
+                await update.message.reply_text(f"❌ {tp.get('country_name', target_id)} مش عنده وصمة."); return
+            label = tp.get("traitor_label", "خائن")
+            data["players"][str(target_id)]["traitor"] = False
+            data["players"][str(target_id)]["traitor_label"] = ""
+            save_data(data)
+            name = tp.get("country_name", str(target_id))
+            await update.message.reply_text(f"✅ *رُفعت وصمة '{label}' عن {name}*", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=target_id,
+                    text=f"✅ *رُفعت وصمتك من الإدارة*\nيمكنك اللعب بشكل طبيعي.", parse_mode="Markdown")
+            except: pass
+            return
+        if ntext.startswith("وصمة ") or ntext.startswith("خائن "):
+            parts = ntext.replace("وصمة","").replace("خائن","").strip().split(None, 1)
+            if not parts:
+                await update.message.reply_text("❌ الصيغة: `وصمة [telegram_id] [الوصمة]`\nمثال: `وصمة 123456789 محتال`", parse_mode="Markdown"); return
+            try: target_id = int(parts[0])
+            except: await update.message.reply_text("❌ لازم رقم telegram_id أولاً"); return
+            label = parts[1].strip() if len(parts) > 1 else "خائن"
+            if str(target_id) not in data.get("players", {}):
+                await update.message.reply_text(f"❌ اللاعب {target_id} مش عنده دولة."); return
+            tp = data["players"][str(target_id)]
+            # لو نفس الوصمة — ارفعها
+            if tp.get("traitor") and tp.get("traitor_label","") == label:
+                data["players"][str(target_id)]["traitor"] = False
+                data["players"][str(target_id)]["traitor_label"] = ""
+                save_data(data)
+                name = tp.get("country_name", str(target_id))
+                await update.message.reply_text(f"✅ *رُفعت وصمة '{label}' عن {name}*", parse_mode="Markdown")
+                try:
+                    await context.bot.send_message(chat_id=target_id,
+                        text=f"✅ *رُفعت وصمتك من الإدارة*", parse_mode="Markdown")
+                except: pass
+            else:
+                data["players"][str(target_id)]["traitor"] = True
+                data["players"][str(target_id)]["traitor_label"] = label
+                save_data(data)
+                name = tp.get("country_name", str(target_id))
+                await update.message.reply_text(
+                    f"🗡️ *وُصم {name} بـ '{label}'!*\n{sep()}\n"
+                    f"ستظهر جنب اسمه في كل القوائم: 🗡️{label}", parse_mode="Markdown")
+                try:
+                    await context.bot.send_message(chat_id=target_id,
+                        text=f"🗡️ *وُصمت دولتك بـ '{label}' من الإدارة*", parse_mode="Markdown")
+                except: pass
+            return
+
         # ======= سجل دولة — debug =======
         if ntext.startswith("سجل "):
             country_q = ntext.replace("سجل","").strip()
@@ -8843,6 +9085,63 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_data(data)
                 cat = CONTROL_TOGGLES[key]["cat"]
                 await _show_control_panel(query, data, uid, cat)
+        return
+
+    # ======= إعلان — اختيار الوجهة =======
+    if query.data in ["announce_topic", "announce_groups", "announce_both"] and is_admin(uid):
+        raw = data.get("pending_announcement", {}).get(str(uid))
+        if not raw:
+            await query.edit_message_text("❌ انتهت صلاحية الإعلان. أعد كتابة الأمر."); return
+        # فصل العنوان عن النص
+        if "|" in raw:
+            title, body = raw.split("|", 1)
+            title = title.strip(); body = body.strip()
+        else:
+            title = None; body = raw
+        title_msg = f"*{title}*\n{'━' * 28}" if title else None
+        lines   = [l.strip() for l in body.split("\n") if l.strip()]
+        body_msg = "\n\n".join(f">{line}" for line in lines)
+
+        async def send_to_dest(chat_id, topic_id=None):
+            kwargs = {"chat_id": chat_id, "parse_mode": "Markdown"}
+            if topic_id: kwargs["message_thread_id"] = topic_id
+            if title_msg:
+                await context.bot.send_message(**{**kwargs, "text": title_msg})
+            sent = await context.bot.send_message(**{**kwargs, "text": body_msg})
+            return sent
+
+        results = []
+        # التوبيك
+        if query.data in ["announce_topic", "announce_both"]:
+            channel_id = data.get("news_channel_id", 0)
+            topic_id   = data.get("announcement_topic_id") or data.get("news_topic_id", 0)
+            if channel_id:
+                try:
+                    sent = await send_to_dest(channel_id, topic_id)
+                    try: await context.bot.pin_chat_message(chat_id=channel_id, message_id=sent.message_id, disable_notification=True)
+                    except: pass
+                    results.append("📌 التوبيك ✅")
+                except Exception as e:
+                    results.append(f"📌 التوبيك ❌ ({e})")
+            else:
+                results.append("📌 التوبيك ❌ (مش محدد)")
+        # الجروبات
+        if query.data in ["announce_groups", "announce_both"]:
+            groups = data.get("allowed_groups", {})
+            sent_g = 0; failed_g = 0
+            for gid_str in groups:
+                try:
+                    await send_to_dest(int(gid_str))
+                    sent_g += 1
+                    await asyncio.sleep(0.3)
+                except: failed_g += 1
+            results.append(f"💬 الجروبات: {sent_g} ✅ / {failed_g} ❌")
+        # امسح الإعلان المعلق
+        data.get("pending_announcement", {}).pop(str(uid), None)
+        save_data(data)
+        await query.edit_message_text(
+            f"✅ *تم النشر!*\n{sep()}\n" + "\n".join(results),
+            parse_mode="Markdown")
         return
 
     # ======= toggle قديم للتوافق =======

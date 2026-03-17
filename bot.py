@@ -588,11 +588,13 @@ WEAPON_REQUIREMENTS = {
     "منظومة_صواريخ":    {"infra": 3},
     "طائرات_شبح":       {"infra": 4},
     "صواريخ_极超音速":   {"infra": 6},
-    "فيروس_معطل":       {"infra": 8,  "facility": "مختبر_بيولوجي"},
-    "وباء_مستهدف":      {"infra": 10, "facility": "مختبر_بيولوجي"},
-    "طاعون_اقتصادي":    {"infra": 12, "facility": "مختبر_بيولوجي"},
-    "قنبلة_ذرية":       {"infra": 5,  "level": 5, "facility": "مفاعل"},
-    "قنبلة_هيدروجينية": {"infra": 6,  "level": 6, "facility": "مفاعل"},
+    # بيولوجي — يحتاج مختبر (infra 20) + مستوى عالي
+    "فيروس_معطل":       {"infra": 20, "level": 7,  "facility": "مختبر_بيولوجي"},
+    "وباء_مستهدف":      {"infra": 20, "level": 9,  "facility": "مختبر_بيولوجي"},
+    "طاعون_اقتصادي":    {"infra": 20, "level": 11, "facility": "مختبر_بيولوجي"},
+    # نووي — يحتاج مفاعل (infra 10) + مستوى عالي جداً
+    "قنبلة_ذرية":       {"infra": 10, "level": 8,  "facility": "مفاعل"},
+    "قنبلة_هيدروجينية": {"infra": 10, "level": 10, "facility": "مفاعل"},
 }
 
 # شروط بناء المنشآت الخاصة
@@ -1242,6 +1244,8 @@ def load_data():
     })
     d.setdefault("last_stock_update", 0)
     d.setdefault("unoccupied_territories", {})  # مناطق فارغة مغزوة {region: {occupied_by, occupied_at}}
+    d.setdefault("banned_users", {})             # {uid: ban_until_timestamp}
+    d.setdefault("announcement_topic_id", 0)     # توبيك الإعلانات
     d.setdefault("weapon_market", [])            # سوق الأسلحة بين اللاعبين
     return d
 
@@ -2568,11 +2572,486 @@ _FOOD_LOW = [
 # ======= صيغ النشرات المتنوعة =======
 
 def _news_classic(data, pvs, stats):
-    """النشرة الكلاسيكية — مذيع رسمي ساخر"""
-    anchor  = random.choice(["🎙️ أبو فراس الحربي","🎙️ الإعلامي كمال النشرة","🎙️ المذيع فيصل الخبر"])
-    channel = random.choice(["📡 وكالة أنباء صراع الحضارات","📺 قناة الخليج الساخرة","🗞️ جريدة الرمال","📻 إذاعة المنطقة"])
-    sep = "─"*32
-    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    """نشرة أخبار بأسلوب قنوات إخبارية عربية + تعليقات تويتر"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    log = data.get("game_log", [])
+    ev  = data.get("world_event")
+    ev_ends = data.get("world_event_ends", 0)
+    sep_line = "━" * 30
+
+    channels = ["📺 الجزيرة — منطقة الصراع","📡 العربية — نشرة خاصة","📻 BBC عربي — التقرير الليلي","🗞️ الشرق الأوسط — طازج"]
+    channel  = random.choice(channels)
+
+    news = f"{sep_line}\n{channel}\n{sep_line}\n\n"
+
+    # الحدث العالمي
+    if ev and time.time() < ev_ends:
+        rem = int((ev_ends - time.time()) // 3600)
+        news += f"🔴 *عاجل |* {ev['emoji']} *{ev['name']}*\n_{ev['desc']} — ينتهي بعد {rem} ساعة_\n\n"
+
+    # أحداث حقيقية من السجل
+    recent = [e for e in reversed(log) if time.time() - e.get("ts",0) < 3600*8][:5]
+    if recent:
+        news += f"📋 *آخر التطورات الميدانية:*\n"
+        templates = {
+            "🏴": [
+                "مصادر ميدانية تؤكد: {text}",
+                "مراسلنا من المنطقة: {text}",
+                "عاجل من الميدان — {text}",
+            ],
+            "🏆": [
+                "في تطور لافت: {text}",
+                "مصادر عسكرية تكشف: {text}",
+                "حسب آخر المعطيات — {text}",
+            ],
+            "⚔️": [
+                "تصاعد التوترات: {text}",
+                "مراسلنا الحربي يفيد: {text}",
+            ],
+            "💹": [
+                "حركة في الأسواق: {text}",
+                "تقارير اقتصادية: {text}",
+            ],
+        }
+        for entry in recent:
+            emoji = entry.get("emoji","📌")
+            t_list = templates.get(emoji, ["{text}"])
+            tmpl = random.choice(t_list)
+            ago = int(time.time() - entry.get("ts",0))
+            t = f"منذ {ago//60}د" if ago < 3600 else f"منذ {ago//3600}س"
+            news += f"  {emoji} {tmpl.format(text=entry['text'])} _({t})_\n"
+        news += "\n"
+
+    # الوضع العسكري
+    if at_war_list:
+        news += f"⚔️ *جبهات المواجهة:*\n"
+        for name, enemies in at_war_list[:2]:
+            enemy = enemies[0] if enemies else "قوى مجهولة"
+            war_lines = [
+                f"المواجهة بين *{name}* و*{enemy}* تتصاعد وسط تقارير عن خسائر بشرية",
+                f"معارك عنيفة بين *{name}* و*{enemy}* — الوضع الإنساني ينذر بالخطر",
+                f"لا إشارة لوقف إطلاق النار في الصراع بين *{name}* و*{enemy}*",
+            ]
+            news += f"  🔴 {random.choice(war_lines)}\n"
+        news += "\n"
+
+    # الاحتلالات
+    if occupied:
+        news += f"🏴 *مناطق تحت السيطرة:*\n"
+        for occ, by_who in occupied[:2]:
+            news += f"  • *{occ}* تحت سيطرة *{by_who}* — مطالبات دولية بالانسحاب لم تُجدِ نفعاً\n"
+        news += "\n"
+
+    # الاقتصاد
+    news += f"💰 *التقرير الاقتصادي:*\n"
+    news += f"  🥇 *{richest['country_name']}* تتصدر بثروة {CUR}{richest['gold']:,}\n"
+    if poorest['country_name'] != richest['country_name']:
+        poor_lines = [
+            f"  📉 *{poorest['country_name']}* تعاني اقتصادياً — خزينتها {CUR}{poorest['gold']:,}",
+            f"  ⚠️ مخاوف من انهيار اقتصادي في *{poorest['country_name']}*",
+        ]
+        news += random.choice(poor_lines) + "\n"
+    news += "\n"
+
+    # تويتات تعليقية
+    tweet_accounts = [
+        f"@مواطن_{random.choice(['غاضب','متابع','محلل','صاحي'])}",
+        f"@{random.choice(['أبو','أم','ابن'])}_{random.choice(['محمد','أحمد','علي','فاطمة'])}",
+        f"@{random.choice(['محلل','خبير','مراقب'])}_سياسي",
+        "@ساكن_الحدود", "@المنطقة_الساخنة", "@صوت_الشعب",
+    ]
+    news += f"🐦 *تعليقات الرأي العام:*\n"
+    tweets = []
+    if at_war_list:
+        name, enemies = at_war_list[0]
+        enemy = enemies[0] if enemies else "الجانب الآخر"
+        tweets += [
+            f"_{random.choice(tweet_accounts)}: \"الله يستر على اللي جاي... {name} ما بتهدى 😰\"_",
+            f"_{random.choice(tweet_accounts)}: \"كل يوم أصحى على خبر جديد في المنطقة 🤦\"_",
+            f"_{random.choice(tweet_accounts)}: \"{enemy} اليوم، بكره مين؟ 👀\"_",
+        ]
+    if occupied:
+        occ, by_who = occupied[0]
+        tweets += [
+            f"_{random.choice(tweet_accounts)}: \"{occ} تحت {by_who}... التاريخ يتكرر 😔\"_",
+            f"_{random.choice(tweet_accounts)}: \"متى تنتهي هذه الحقبة؟ #أحرار\"_",
+        ]
+    if most_unhappy and most_unhappy[1] < 40:
+        tweets += [
+            f"_{random.choice(tweet_accounts)}: \"الوضع في {most_unhappy[0]} يتدهور والحكومة صامتة 😤\"_",
+            f"_{random.choice(tweet_accounts)}: \"{most_unhappy[0]} — {most_unhappy[1]}% رضا؟ يعني ٧٠% غاضبون! 🔥\"_",
+        ]
+    tweets += [
+        f"_{random.choice(tweet_accounts)}: \"{richest['country_name']} والفلوس... يا ريتنا مثلهم 💸\"_",
+        f"_{random.choice(tweet_accounts)}: \"المنطقة تتغير كل يوم وأنا لسه ما فهمت مين حليف مين 😅\"_",
+        f"_{random.choice(tweet_accounts)}: \"{strongest['country_name']} و{strongest['army']:,} جندي... لأغراض دفاعية بالتأكيد 🙃\"_",
+    ]
+    random.shuffle(tweets)
+    for tw in tweets[:3]:
+        news += f"  {tw}\n"
+
+    news += f"\n{sep_line}\n📊 {total_players} دولة | ⚔️ {total_army:,} | 💰 {CUR}{total_gold:,}"
+    return news
+
+
+def _news_gossip(data, pvs, stats):
+    """نشرة شائعات بأسلوب صحافة صفراء + تسريبات"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    log = data.get("game_log", [])
+    sep_line = "━" * 30
+
+    news = f"{sep_line}\n🗣️ *المصدر الموثوق — ما يُقال خلف الكواليس*\n_تسريبات وشائعات غير مؤكدة... أو ربما مؤكدة_\n{sep_line}\n\n"
+
+    # أحداث حقيقية بصياغة تسريب
+    recent = [e for e in reversed(log) if time.time() - e.get("ts",0) < 3600*12][:3]
+    if recent:
+        news += f"🔒 *تسريبات اليوم:*\n"
+        for entry in recent:
+            leak_intros = [
+                "مصدر مطلع كشف لنا:",
+                "وثيقة سرية تكشف:",
+                "مسؤول رفض الكشف عن هويته قال:",
+                "تسجيل مسرب يظهر:",
+            ]
+            news += f"  📁 _{random.choice(leak_intros)} {entry['text']}_\n"
+        news += "\n"
+
+    # شائعات مبنية على الإحصائيات
+    gossips = []
+    gossips.append(random.choice([
+        f"💰 يُقال إن {richest['country_name']} تستعد لبناء أضخم جيش في المنطقة — وهذا يُقلق الجيران كثيراً",
+        f"🤑 مصادر: {richest['country_name']} عرضت شراء منطقة مجاورة بـ{CUR}{richest['gold']//4:,} — العرض رُفض رسمياً",
+        f"💎 همسات في الأروقة: {richest['country_name']} تتفاوض سراً مع 3 دول على تحالف اقتصادي",
+    ]))
+    if strongest['army'] > 1000:
+        gossips.append(random.choice([
+            f"🪖 مصادر عسكرية: {strongest['country_name']} أجرت مناورات قرب الحدود — الجيران استدعوا سفراءهم",
+            f"⚔️ تسريب: قيادة {strongest['country_name']} اجتمعت 3 مرات هذا الأسبوع — جدول الأعمال سري",
+        ]))
+    if at_war_list:
+        name, enemies = random.choice(at_war_list)
+        gossips.append(random.choice([
+            f"🕊️ مفاوضات سرية بين {name} و{enemies[0] if enemies else 'الطرف الآخر'} — طرف ثالث يتوسط",
+            f"💣 مصادر: {name} طلبت أسلحة متطورة قبل الحرب بساعات — من وافق؟ لا أحد يعلم",
+            f"🔥 تقارير: {name} فقدت أكثر مما أعلنت رسمياً — الأرقام الحقيقية مقلقة",
+        ]))
+    if occupied:
+        occ, by_who = random.choice(occupied)
+        gossips.append(f"🏴 مصدر في {occ}: 'الأوضاع أصعب مما تصوره {by_who} في بياناتها الرسمية'")
+    if poorest['country_name'] != richest['country_name']:
+        gossips.append(f"📉 مصادر: {poorest['country_name']} تدرس طلب مساعدة مالية طارئة — الكبار صامتون حتى الآن")
+
+    random.shuffle(gossips)
+    for i, g in enumerate(gossips[:4], 1):
+        news += f"*{i}.* {g}\n\n"
+
+    # تويت ختامي
+    accounts = ["@مراقب_دولي","@صحفي_مستقل","@مصدر_خاص","@كاشف_الأسرار"]
+    news += f"{sep_line}\n_{random.choice(accounts)}: \"ما نشرناه اليوم 10% مما نعلمه... والباقي ينتظر الوقت المناسب\"_ 🤫"
+    return news
+
+
+def _news_report(data, pvs, stats):
+    """نشرة تحليلية بأسلوب مراكز الأبحاث + تقارير دولية"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    sep_line = "━" * 30
+    avg_gold = total_gold // total_players if total_players else 0
+    avg_army = total_army // total_players if total_players else 0
+
+    institutes = ["🏛️ مركز الدراسات الاستراتيجية","📊 معهد تحليل الصراعات","🔬 وحدة الرصد والمتابعة"]
+    news = f"{sep_line}\n{random.choice(institutes)}\n_التقرير الدوري — للمعنيين فقط_\n{sep_line}\n\n"
+
+    news += f"📊 *مؤشرات المنطقة:*\n"
+    news += f"  🌍 الدول النشطة: *{total_players}*\n"
+    news += f"  💰 إجمالي الثروة: *{CUR}{total_gold:,}* | المتوسط: *{CUR}{avg_gold:,}*\n"
+    news += f"  ⚔️ إجمالي القوة العسكرية: *{total_army:,}* | المتوسط: *{avg_army:,}*\n"
+    news += f"  🔥 حروب نشطة: *{len(at_war_list)}* | 🏴 محتلات: *{len(occupied)}*\n\n"
+
+    # تحليل موازين القوى
+    news += f"⚖️ *موازين القوى:*\n"
+    ranked_gold = sorted(pvs, key=lambda x: x.get("gold",0), reverse=True)
+    ranked_army = sorted(pvs, key=lambda x: x.get("army",0), reverse=True)
+    for i, p in enumerate(ranked_gold[:3]):
+        pct = int(p['gold']/total_gold*100) if total_gold else 0
+        gold_bar = "█" * min(8, pct//5) + "░" * max(0, 8-pct//5)
+        news += f"  {'🥇🥈🥉'[i]} *{p['country_name']}* [{gold_bar}] {pct}% ثروة المنطقة\n"
+    news += "\n"
+
+    # تحليل التوترات
+    if at_war_list:
+        news += f"🚨 *مناطق التوتر العالي:*\n"
+        for name, enemies in at_war_list[:3]:
+            threat = random.choice(["تهديد مرتفع","وضع متفجر","صراع مفتوح","مواجهة حتمية"])
+            news += f"  ⚔️ *{name}* ↔ *{', '.join(enemies[:2])}* — مستوى التهديد: _{threat}_\n"
+        news += "\n"
+
+    # تحليل الرفاه
+    if happy_data:
+        stable   = [(n,h) for n,h,_ in happy_data if h >= 60]
+        unstable = [(n,h) for n,h,_ in happy_data if h < 40]
+        if stable:
+            news += f"✅ *دول مستقرة ({len(stable)}):* {', '.join(n for n,_ in stable[:3])}\n"
+        if unstable:
+            news += f"⚠️ *دول في خطر ({len(unstable)}):* {', '.join(n for n,_ in unstable[:3])}\n"
+        news += "\n"
+
+    # خلاصة تحليلية
+    scenarios = []
+    if len(at_war_list) >= 2:
+        scenarios.append("📌 _تصاعد محتمل: حرب متعددة الأطراف إذا اتسعت دوائر الصراع_")
+    if len(occupied) >= 2:
+        scenarios.append("📌 _توسع إمبريالي: قوة مهيمنة تتشكل — الموازنة الإقليمية مطلوبة_")
+    if not scenarios:
+        scenarios.append("📌 _استقرار نسبي: المنطقة في مرحلة إعادة تموضع — التوترات كامنة_")
+    for s in scenarios:
+        news += f"{s}\n"
+
+    # تويتات محللين
+    news += f"\n🐦 *ردود الفعل الأكاديمية:*\n"
+    analysts = ["@د_سياسات_دولية","@باحث_شؤون_إقليمية","@أستاذ_جيوسياسة","@خبير_أمن_إقليمي"]
+    analyst_tweets = [
+        f"_{random.choice(analysts)}: \"ما يحدث في المنطقة يستوجب اجتماعاً طارئاً للمنظمات الدولية\"_",
+        f"_{random.choice(analysts)}: \"الأرقام تتحدث عن نفسها — {strongest['country_name']} تبني قوة لا يمكن تجاهلها\"_",
+        f"_{random.choice(analysts)}: \"التاريخ يخبرنا: الهدوء قبل العاصفة أخطر من العاصفة ذاتها\"_",
+        f"_{random.choice(analysts)}: \"موازين القوى تتبدل بسرعة مقلقة — المنطقة تحتاج دبلوماسية عاجلة\"_",
+    ]
+    random.shuffle(analyst_tweets)
+    for tw in analyst_tweets[:2]:
+        news += f"  {tw}\n"
+
+    news += f"\n{sep_line}\n📅 _هذا التقرير للأغراض التحليلية فقط — الأرقام في تغير مستمر_"
+    return news
+
+
+def _news_interview(data, pvs, stats):
+    """مقابلة حية + تغريدات مواطنين"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    log = data.get("game_log", [])
+    sep_line = "━" * 30
+
+    candidates = []
+    if at_war_list:
+        for name, _ in at_war_list[:2]:
+            p = next((pp for pp in pvs if pp.get("country_name","").replace(" (محتلة)","") == name), None)
+            if p: candidates.append(p)
+    if not candidates:
+        candidates = sorted(pvs, key=lambda x: x.get("xp",0), reverse=True)[:3]
+    subject = random.choice(candidates) if candidates else pvs[0]
+    gold = subject.get("gold",0)
+    army = subject.get("army",0)
+    is_rich    = gold > avg_g if (avg_g := total_gold//total_players if total_players else 1) else False
+    is_at_war  = bool(subject.get("at_war"))
+    is_occ     = bool(subject.get("occupied_by"))
+
+    interviewers = ["🎙️ مراسلة الجزيرة","🎤 مراسل العربية","📻 مذيع BBC عربي","🎬 مراسل ميداني"]
+    news = f"{sep_line}\n🎙️ *مقابلة خاصة — {subject['country_name']}*\n_{random.choice(interviewers)} يلتقي بالمسؤول_\n{sep_line}\n\n"
+
+    # أسئلة مبنية على أحداث حقيقية
+    recent = [e for e in reversed(log) if subject['country_name'].split(" (")[0] in e.get("text","")][:2]
+    qa_pairs = []
+    for entry in recent:
+        qa_pairs.append((
+            f"❓ بشأن: _{entry['text']}_، ما تعليقكم؟",
+            random.choice([
+                f"*المسؤول:* 'هذا شأن داخلي ولن نعلق عليه رسمياً'",
+                f"*المسؤول:* 'الأمور تسير وفق الخطة الاستراتيجية'",
+                f"*المسؤول:* 'سنصدر بياناً رسمياً في الوقت المناسب'",
+            ])
+        ))
+
+    if is_at_war:
+        enemy = subject['at_war'][0] if subject.get('at_war') else "الطرف الآخر"
+        qa_pairs += [
+            (f"❓ الحرب مع {enemy} — متى تنتهي؟",
+             f"*المسؤول:* 'عندما تتحقق أهدافنا المشروعة — لا تفاوض تحت النار'"),
+            (f"❓ الخسائر البشرية تتصاعد...",
+             f"*المسؤول:* 'نُثمّن تضحيات أبطالنا — الانتصار قادم بإذن الله'"),
+        ]
+    if is_occ:
+        occ_by = subject.get("occupied_by","؟")
+        qa_pairs += [
+            (f"❓ كيف حال مواطنيكم في ظل سيطرة {occ_by}؟",
+             f"*المسؤول:* '...' _(توقف طويل)_ 'نناشد المجتمع الدولي'"),
+        ]
+    if is_rich:
+        qa_pairs += [
+            (f"❓ ثروتكم {CUR}{gold:,} — ما سر النجاح؟",
+             random.choice([
+                f"*المسؤول:* 'الاستقرار السياسي والاستثمار الذكي — لا سر غير ذلك'",
+                f"*المسؤول:* 'شعبنا المجتهد هو المصدر الحقيقي لهذه الثروة'",
+             ])),
+        ]
+    if not qa_pairs:
+        qa_pairs = [
+            ("❓ كيف تقيّمون الوضع الإقليمي؟",
+             f"*المسؤول:* 'نتابع باهتمام بالغ ونأمل في تغليب الحكمة'"),
+            ("❓ رسالة للجيران؟",
+             f"*المسؤول:* 'السلام خيار استراتيجي — ولكنه ليس ضعفاً'"),
+            ("❓ ما خططكم للمرحلة القادمة؟",
+             f"*المسؤول:* 'التنمية أولاً والتنمية ثانياً والتنمية ثالثاً'"),
+        ]
+
+    random.shuffle(qa_pairs)
+    for q, a in qa_pairs[:3]:
+        news += f"{q}\n{a}\n\n"
+
+    # تغريدات المواطنين على المقابلة
+    citizen_accounts = [
+        f"@مواطن_{random.choice(['عادي','غاضب','متشائم','متفائل'])}",
+        f"@{random.choice(['أبو','أم','ابن'])}_{random.choice(['صالح','ماجد','سلمى','ريم'])}",
+        "@من_الشارع", "@صوت_الناس", "@مواطن_يسأل",
+    ]
+    news += f"💬 *تفاعل الجمهور مع المقابلة:*\n"
+    citizen_tweets = [
+        f"_{random.choice(citizen_accounts)}: \"كالعادة — كلام كثير وأفعال قليلة 😒\"_",
+        f"_{random.choice(citizen_accounts)}: \"المسؤول محترف في تجنب الإجابة 👏\"_",
+        f"_{random.choice(citizen_accounts)}: \"لأول مرة أسمع كلاماً صريحاً 👍\"_",
+        f"_{random.choice(citizen_accounts)}: \"متى يتكلم المسؤولون بصراحة؟ 🙏\"_",
+        f"_{random.choice(citizen_accounts)}: \"الوضع أعقد مما يصوّره المسؤول بكثير\"_",
+    ]
+    random.shuffle(citizen_tweets)
+    for tw in citizen_tweets[:2]:
+        news += f"  {tw}\n"
+
+    news += f"\n{sep_line}\n🎙️ _'انتهت المقابلة — المسؤول غادر دون أسئلة إضافية'_"
+    return news
+
+
+def _news_flash(data, pvs, stats):
+    """أخبار عاجلة حية مبنية على game_log"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    log = data.get("game_log", [])
+    ev  = data.get("world_event")
+    ev_ends = data.get("world_event_ends", 0)
+    sep_line = "━" * 30
+
+    news = f"{sep_line}\n🚨 *عاجل | شريط الأخبار المباشر*\n📡 _تغطية لحظة بلحظة_\n{sep_line}\n\n"
+
+    # حدث عالمي
+    if ev and time.time() < ev_ends:
+        news += f"🔴 *عاجل عاجل:* {ev['emoji']} {ev['name']} — {ev['desc']}\n\n"
+
+    # أحداث حقيقية بصياغة شريط أخبار
+    recent = [e for e in reversed(log) if time.time() - e.get("ts",0) < 3600*6][:6]
+    flashes = []
+
+    for entry in recent:
+        ago = int(time.time() - entry.get("ts",0))
+        t   = f"{ago//60}د" if ago < 3600 else f"{ago//3600}س"
+        emoji = entry.get("emoji","📌")
+        txt   = entry["text"]
+        breaking_styles = [
+            f"🔴 *عاجل [{t}]:* {txt}",
+            f"⚡ *للتو [{t}]:* {txt}",
+            f"📢 *خبر عاجل [{t}]:* {txt}",
+        ]
+        flashes.append(random.choice(breaking_styles))
+
+    # إضافة أخبار من الإحصائيات لو السجل فارغ
+    if not flashes:
+        if at_war_list:
+            name, enemies = at_war_list[0]
+            flashes.append(f"🔴 *عاجل:* اشتباكات مستمرة بين *{name}* و*{enemies[0] if enemies else '؟'}*")
+        flashes.append(f"💰 *عاجل:* {richest['country_name']} تتصدر الاقتصاد بـ{CUR}{richest['gold']:,}")
+        flashes.append(f"⚔️ *عاجل:* {strongest['country_name']} تملك أضخم جيش في المنطقة — {strongest['army']:,} جندي")
+        if most_unhappy and most_unhappy[1] < 35:
+            flashes.append(f"😡 *عاجل:* رضا شعب {most_unhappy[0]} انخفض إلى {most_unhappy[1]}%")
+
+    for flash in flashes[:5]:
+        news += f"▪️ {flash}\n\n"
+
+    # تغريدات عاجلة
+    breaking_accounts = [
+        "@أخبار_عاجلة_الآن", "@مراسل_ميداني", "@شاهد_عيان",
+        f"@{random.choice(['محمد','أحمد','سارة'])}_{random.choice(['من الميدان','شاهد','مراسل'])}",
+    ]
+    news += f"🐦 *التويتر يشتعل:*\n"
+    twitter_breaking = [
+        f"_{random.choice(breaking_accounts)}: \"لا أصدق ما أراه بعيني الآن 😱\"_",
+        f"_{random.choice(breaking_accounts)}: \"الأحداث تتسارع بشكل لم نشهده من قبل\"_",
+        f"_{random.choice(breaking_accounts)}: \"هاشتاق المنطقة وصل الترند العالمي 📈\"_",
+        f"_{random.choice(breaking_accounts)}: \"تابعوا معنا — الأحداث لم تنته بعد 👁️\"_",
+    ]
+    random.shuffle(twitter_breaking)
+    for tw in twitter_breaking[:2]:
+        news += f"  {tw}\n"
+
+    news += f"\n{sep_line}\n📡 _'نشرة مستمرة — لا تغيروا القناة'_"
+    return news
+
+
+def _news_realtime(data, pvs, stats):
+    """تقرير ميداني مبني بالكامل على أحداث اللعبة الأخيرة"""
+    richest,poorest,strongest,weakest,biggest,advanced,at_war_list,occupied,orgs,\
+    total_gold,total_army,total_players,happy_data,most_unhappy,most_happy,hungry_states,revolting = stats
+    log = data.get("game_log", [])
+    ev  = data.get("world_event")
+    ev_ends = data.get("world_event_ends", 0)
+    sep_line = "━" * 30
+
+    news = f"{sep_line}\n📰 *التقرير الميداني — ما حدث فعلاً*\n🗓️ _توثيق أحداث المنطقة_\n{sep_line}\n\n"
+
+    # حدث عالمي
+    if ev and time.time() < ev_ends:
+        rem = int((ev_ends - time.time()) // 3600)
+        news += f"{ev['emoji']} *حدث عالمي مستمر:*\n_{ev['name']} — {ev['desc']}_\n⏱️ لا يزال نشطاً لـ {rem} ساعة\n\n"
+
+    # تصنيف الأحداث الحقيقية
+    recent = [e for e in reversed(log) if time.time() - e.get("ts",0) < 3600*12][:8]
+
+    war_events   = [e for e in recent if e.get("emoji") in ["⚔️","🏆","🏴"]]
+    econ_events  = [e for e in recent if e.get("emoji") in ["💹","🛒","💰"]]
+    other_events = [e for e in recent if e not in war_events and e not in econ_events]
+
+    if war_events:
+        news += f"⚔️ *الجبهة العسكرية:*\n"
+        for e in war_events[:3]:
+            ago = int(time.time() - e.get("ts",0))
+            t   = f"منذ {ago//60}د" if ago < 3600 else f"منذ {ago//3600}س"
+            news += f"  {e['emoji']} {e['text']} _({t})_\n"
+        news += "\n"
+
+    if econ_events:
+        news += f"💹 *الجبهة الاقتصادية:*\n"
+        for e in econ_events[:2]:
+            news += f"  {e['emoji']} {e['text']}\n"
+        news += "\n"
+
+    if other_events:
+        news += f"📌 *أحداث أخرى:*\n"
+        for e in other_events[:2]:
+            news += f"  {e['emoji']} {e['text']}\n"
+        news += "\n"
+
+    if not recent:
+        news += "🕊️ _هدوء تام في المنطقة — لا أحداث مسجلة في الساعات الأخيرة_\n\n"
+
+    # الخلاصة الراهنة
+    news += f"{sep_line}\n📊 *الوضع الراهن:*\n"
+    news += f"  ⚔️ حروب: *{len(at_war_list)}* | 🏴 محتلات: *{len(occupied)}* | 🏛️ أحلاف: *{len(orgs)}*\n"
+    news += f"  💰 *{richest['country_name']}* الأغنى — {CUR}{richest['gold']:,}\n"
+    news += f"  🪖 *{strongest['country_name']}* الأقوى — {strongest['army']:,} جندي\n"
+    if most_unhappy and most_unhappy[1] < 40:
+        news += f"  ⚠️ توتر شعبي في *{most_unhappy[0]}* — رضا {most_unhappy[1]}%\n"
+
+    # تغريدات ختامية
+    end_accounts = ["@مراقب_أممي","@صحفي_مستقل","@محلل_شؤون_عربية","@مواطن_المنطقة"]
+    news += f"\n🐦 *الرأي العام:*\n"
+    end_tweets = [
+        f"_{random.choice(end_accounts)}: \"المنطقة لا تنام — والتاريخ يُسجّل كل شيء\"_",
+        f"_{random.choice(end_accounts)}: \"كل يوم جديد يحمل مفاجآت لم تكن في الحسبان\"_",
+        f"_{random.choice(end_accounts)}: \"من يكتب تاريخ هذه المنطقة سيحتاج ألف صفحة\"_",
+        f"_{random.choice(end_accounts)}: \"الصامتون اليوم سيتكلم عنهم التاريخ غداً\"_",
+    ]
+    random.shuffle(end_tweets)
+    news += f"  {end_tweets[0]}\n"
+    news += f"\n{sep_line}\n📰 _'الوقائع موثقة — التحليل متروك لكم'_"
+    return news
 
     intros = [
         "مساء الخير يا مشاهدين الكرام، وأنا عارف إنكم ما عندكم غيرنا 😤",
@@ -3393,7 +3872,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "مساعده","اوامر","help","cocg","المضائق","جيشي","قواتي","تسليحي","عتادي",
         "تعديل","غير","تحديث","علم","تعيين","اغلق","افتح","مضيق","نشره","نشرة","تغيير",
         "تفعيل","الغاء","احصائيات","إحصائيات","الاحلاف","قائمة","ادمن","admin",
-        "حذف","تجميد","رفع","بان","وصمة","خائن","منح","رفع وصمة","رفع وصمه","عقوبة","عقوبه","لاعبين","اللاعبين","نشر","توبيك الاعلانات","توبيك الإعلانات","اعاده","اعادة","اضف","توبيك","ايقاف","فك","تحكم","control",
+        "حذف","تجميد","رفع","بان","وصمه","خائن","منح","رفع وصمه","رفع وصمة","عقوبة","عقوبه","لاعبين","اللاعبين","نشر","توبيك الاعلانات","توبيك الإعلانات","اعاده","اعادة","اضف","توبيك","ايقاف","فك","تحكم","control",
         "حفظ","استعادة","restore","backup",
         "تحرير","استقلال","ثورة","حمايه","حماية","مستعمره","مستعمرة","تحالف",
     }
@@ -6335,14 +6814,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         infra    = p.get("infrastructure",0)
         num_proj = sum(facs.values()) + sum(crops_p.values())
         est_income = p.get("territories",1)*500 + 1000 + num_proj*300 + infra*1500
-        # شريط الثروة
-        wealth_bar = "█" * min(10, gold // 10000) + "░" * max(0, 10 - gold // 10000)
+        # شريط الثروة — مبني على مراحل
+        wealth_levels = [1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000, 10000000, 50000000]
+        filled = sum(1 for lvl in wealth_levels if gold >= lvl)
+        wealth_bar = "█" * filled + "░" * (10 - filled)
         # حالة الخزينة
-        if gold >= 100000:   status = "💎 ثري"
-        elif gold >= 50000:  status = "💰 مرتاح"
-        elif gold >= 10000:  status = "🪙 عادي"
-        elif gold >= 1000:   status = "😐 ضيّق"
-        else:                status = "😰 مفلس"
+        if gold >= 10000000: status = "👑 إمبراطور"
+        elif gold >= 1000000: status = "💎 مليونير"
+        elif gold >= 500000:  status = "🤑 ثري جداً"
+        elif gold >= 100000:  status = "💰 ثري"
+        elif gold >= 50000:   status = "😊 مرتاح"
+        elif gold >= 10000:   status = "🪙 عادي"
+        elif gold >= 1000:    status = "😐 ضيّق"
+        else:                 status = "😰 مفلس"
         msg = (
             f"{box_title('💰','خزينة ' + p['country_name'])}\n\n"
             f"💵 *الرصيد:* {CUR}{gold:,}\n"
@@ -8895,8 +9379,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"✅ *رُفعت وصمتك من الإدارة*\nيمكنك اللعب بشكل طبيعي.", parse_mode="Markdown")
             except: pass
             return
-        if ntext.startswith("وصمة ") or ntext.startswith("خائن "):
-            parts = ntext.replace("وصمة","").replace("خائن","").strip().split(None, 1)
+        if ntext.startswith("وصمة ") or ntext.startswith("وصمه ") or ntext.startswith("خائن "):
+            parts = ntext.replace("وصمة","").replace("وصمه","").replace("خائن","").strip().split(None, 1)
             if not parts:
                 await update.message.reply_text("❌ الصيغة: `وصمة [telegram_id] [الوصمة]`\nمثال: `وصمة 123456789 محتال`", parse_mode="Markdown"); return
             try: target_id = int(parts[0])
@@ -9098,12 +9582,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = title.strip(); body = body.strip()
         else:
             title = None; body = raw
-        title_msg = f"*{title}*\n{'━' * 28}" if title else None
-        lines   = [l.strip() for l in body.split("\n") if l.strip()]
-        body_msg = "\n\n".join(f">{line}" for line in lines)
+
+        import html as html_mod
+        # العنوان — bold + خط فاصل
+        title_msg = f"<b>{html_mod.escape(title)}</b>\n{'━' * 28}" if title else None
+        # النص — كل سطر في blockquote
+        lines = [l.strip() for l in body.split("\n") if l.strip()]
+        body_msg = "\n\n".join(f"<blockquote>{html_mod.escape(line)}</blockquote>" for line in lines)
 
         async def send_to_dest(chat_id, topic_id=None):
-            kwargs = {"chat_id": chat_id, "parse_mode": "Markdown"}
+            kwargs = {"chat_id": chat_id, "parse_mode": "HTML"}
             if topic_id: kwargs["message_thread_id"] = topic_id
             if title_msg:
                 await context.bot.send_message(**{**kwargs, "text": title_msg})
